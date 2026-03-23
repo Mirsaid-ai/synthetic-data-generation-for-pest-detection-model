@@ -13,7 +13,7 @@ export async function POST(req: NextRequest) {
 
     const genAI = getGeminiClient();
     const model = genAI.getGenerativeModel({
-      model: "gemini-2.0-flash-exp",
+      model: "gemini-3.1-flash-image-preview",
       generationConfig: {
         // @ts-expect-error -- image generation response modality
         responseModalities: ["image", "text"],
