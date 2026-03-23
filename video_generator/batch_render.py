@@ -65,8 +65,8 @@ def render_config(cfg_path, output_dir, skip_existing):
         if result.returncode == 0:
             return cfg_path, True, f"OK → {video_path}"
         else:
-            err = result.stderr.strip().split("\n")[-1]
-            return cfg_path, False, f"FAIL: {err}"
+            full_err = result.stderr.strip() if result.stderr else "(no stderr)"
+            return cfg_path, False, f"FAIL:\n{full_err}"
     except subprocess.TimeoutExpired:
         os.remove(tmp_cfg)
         return cfg_path, False, "FAIL: timeout (>10 min)"

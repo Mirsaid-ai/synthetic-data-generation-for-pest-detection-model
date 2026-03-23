@@ -1,0 +1,5 @@
+node_modules/
+.next/
+.env.local
+public/approved_images/*.png
+public/approved_images/*.json

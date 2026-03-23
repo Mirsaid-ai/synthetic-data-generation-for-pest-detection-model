@@ -42,6 +42,10 @@ PEST_DEFAULTS = {
         "size_range":  (20, 45),
         "speed_range": (6, 13),
     },
+    "rat": {
+        "size_range":  (55, 90),
+        "speed_range": (3, 7),
+    },
 }
 
 
@@ -54,11 +58,6 @@ def random_pest_entry(ptype, count):
         "speed": round(random.uniform(*d["speed_range"]), 1),
     }
 
-
-def generate_config(image, mask, depth, output_video, duration, fps):
-    """Build one config dict with a random mix of pests."""
-    # Randomly decide how many of each pest (caller already sampled counts)
-    return None  # built by caller
 
 
 def main():
@@ -76,6 +75,9 @@ def main():
     parser.add_argument("--cockroaches",   type=int, nargs=2, default=[0, 5],
                         metavar=("MIN", "MAX"),
                         help="Min/max cockroaches per video (default: 0 5)")
+    parser.add_argument("--rats",          type=int, nargs=2, default=[0, 2],
+                        metavar=("MIN", "MAX"),
+                        help="Min/max rats per video (default: 0 2)")
     parser.add_argument("--duration",      type=float, nargs=2, default=[15, 30],
                         metavar=("MIN", "MAX"),
                         help="Duration range in seconds (default: 15 30)")
@@ -95,6 +97,8 @@ def main():
         print("[ERROR] --mice MIN must be <= MAX"); raise SystemExit(1)
     if args.cockroaches[0] > args.cockroaches[1]:
         print("[ERROR] --cockroaches MIN must be <= MAX"); raise SystemExit(1)
+    if args.rats[0] > args.rats[1]:
+        print("[ERROR] --rats MIN must be <= MAX"); raise SystemExit(1)
 
     generated = 0
     skipped   = 0
@@ -102,15 +106,21 @@ def main():
     for i in range(args.n):
         n_mice        = random.randint(args.mice[0],        args.mice[1])
         n_cockroaches = random.randint(args.cockroaches[0], args.cockroaches[1])
+        n_rats        = random.randint(args.rats[0],        args.rats[1])
 
-        # Skip configs with no pests at all
-        if n_mice == 0 and n_cockroaches == 0:
+        if n_mice == 0 and n_cockroaches == 0 and n_rats == 0:
             skipped += 1
-            # Force at least one pest
-            if args.mice[1] > 0:
-                n_mice = random.randint(1, args.mice[1])
-            else:
+            choice = random.choice(
+                [t for t, mx in [("mouse", args.mice[1]),
+                                 ("cockroach", args.cockroaches[1]),
+                                 ("rat", args.rats[1])] if mx > 0]
+                or ["mouse"])
+            if choice == "mouse":
+                n_mice = random.randint(1, max(1, args.mice[1]))
+            elif choice == "cockroach":
                 n_cockroaches = random.randint(1, max(1, args.cockroaches[1]))
+            else:
+                n_rats = random.randint(1, max(1, args.rats[1]))
 
         duration = round(random.uniform(args.duration[0], args.duration[1]), 1)
 
@@ -119,6 +129,8 @@ def main():
             pests.append(random_pest_entry("mouse", n_mice))
         if n_cockroaches > 0:
             pests.append(random_pest_entry("cockroach", n_cockroaches))
+        if n_rats > 0:
+            pests.append(random_pest_entry("rat", n_rats))
 
         video_name = f"{args.output_prefix}_{i:04d}.mp4"
 
@@ -138,9 +150,9 @@ def main():
         with open(cfg_path, "w") as f:
             json.dump(cfg, f, indent=2)
 
-        total_pests = n_mice + n_cockroaches
+        total_pests = n_mice + n_cockroaches + n_rats
         print(f"[{i+1:4d}/{args.n}] {cfg_path}  "
-              f"mice={n_mice}  roaches={n_cockroaches}  "
+              f"mice={n_mice}  roaches={n_cockroaches}  rats={n_rats}  "
               f"duration={duration}s  → {video_name}")
         generated += 1
 

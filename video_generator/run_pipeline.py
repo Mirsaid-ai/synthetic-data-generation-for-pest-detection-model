@@ -93,6 +93,7 @@ def main():
                         help="Single config JSON — skips random config generation")
     parser.add_argument("--mice",          type=int, nargs=2, default=[0, 3])
     parser.add_argument("--cockroaches",   type=int, nargs=2, default=[0, 5])
+    parser.add_argument("--rats",          type=int, nargs=2, default=[0, 2])
     parser.add_argument("--duration",      type=float, nargs=2, default=[15, 30])
     parser.add_argument("--fps",           type=int, default=25)
     parser.add_argument("--jobs",          type=int, default=1)
@@ -256,6 +257,7 @@ def main():
             "--n",           str(args.n),
             "--mice",        str(args.mice[0]),        str(args.mice[1]),
             "--cockroaches", str(args.cockroaches[0]), str(args.cockroaches[1]),
+            "--rats",        str(args.rats[0]),        str(args.rats[1]),
             "--duration",    str(args.duration[0]),    str(args.duration[1]),
             "--fps",         str(args.fps),
             "--output_prefix", f"{image_stem}_video",

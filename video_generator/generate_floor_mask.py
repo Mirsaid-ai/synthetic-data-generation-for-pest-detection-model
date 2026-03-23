@@ -65,26 +65,37 @@ ADE20K_NAMES = {
 #  SEGMENTATION
 # ─────────────────────────────────────────────
 
+def get_device():
+    import torch
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 def run_segformer(image_bgr, model_name):
     from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
     import torch
     from PIL import Image
 
-    print(f"[INFO] Loading model: {model_name}")
-    print("       (First run downloads ~110MB and caches — subsequent runs instant)")
+    device = get_device()
+    print(f"[INFO] Loading model: {model_name}  (device: {device})")
     processor = SegformerImageProcessor.from_pretrained(model_name)
     model     = SegformerForSemanticSegmentation.from_pretrained(model_name)
     model.eval()
+    model.to(device)
 
     pil_image = Image.fromarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
-    print("[INFO] Running segmentation (CPU — 10-30s)…")
+    print("[INFO] Running segmentation…")
     inputs = processor(images=pil_image, return_tensors="pt")
+    inputs = {k: v.to(device) for k, v in inputs.items()}
     with torch.no_grad():
         outputs = model(**inputs)
 
     h, w = image_bgr.shape[:2]
     up = torch.nn.functional.interpolate(
-        outputs.logits, size=(h, w), mode="bilinear", align_corners=False)
+        outputs.logits.cpu(), size=(h, w), mode="bilinear", align_corners=False)
     return up.argmax(dim=1).squeeze().numpy().astype(np.int32)
 
 
@@ -142,7 +153,7 @@ def refine_with_depth(mask, depth_path, thresh_norm):
         return mask
     depth   = cv2.resize(depth, (mask.shape[1], mask.shape[0]),
                          interpolation=cv2.INTER_LINEAR)
-    refined = np.where((depth.astype(np.float32)/255.0) > thresh_norm,
+    refined = np.where((depth.astype(np.float32)/255.0) < thresh_norm,
                        mask, 0).astype(np.uint8)
     if refined.sum() == 0:
         print("[WARN] Depth refinement emptied mask — skipping. "

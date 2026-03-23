@@ -1,3 +1,32 @@
-env
-out
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+venv/
+.venv/
+
+# Pipeline outputs
+video_generator/pipeline_out/
+video_generator/out/
+*.mp4
+
+# Model outputs
+model/detr_finetuned*/
+model/*.csv
+
+# Logs
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local

@@ -58,6 +58,7 @@ from collections import defaultdict
 CATEGORIES = [
     {"id": 1, "name": "mouse",     "supercategory": "pest"},
     {"id": 2, "name": "cockroach", "supercategory": "pest"},
+    {"id": 3, "name": "rat",       "supercategory": "pest"},
 ]
 
 
@@ -140,15 +141,11 @@ def build_split_coco(all_records, split_name):
     new_ann_id   = 1
 
     for img_record, anns in all_records:
-        old_id = img_record["image_id"] if "image_id" in img_record else img_record["id"]
-        new_img = {k: v for k, v in img_record.items()}
-        new_img["id"] = new_image_id
+        new_img = {**img_record, "id": new_image_id}
         coco["images"].append(new_img)
 
         for ann in anns:
-            new_ann = {k: v for k, v in ann.items()}
-            new_ann["id"]       = new_ann_id
-            new_ann["image_id"] = new_image_id
+            new_ann = {**ann, "id": new_ann_id, "image_id": new_image_id}
             coco["annotations"].append(new_ann)
             new_ann_id += 1
 
@@ -288,12 +285,12 @@ def main():
         # Move frames to correct split directory
         dest_img_dir = img_dirs[split_name]
         for img_rec, _ in records:
-            src = tmp_dir / img_rec["file_name"]
-            dst = dest_img_dir / img_rec["file_name"]
+            original_name = img_rec["file_name"]
+            src = tmp_dir / original_name
+            dst = dest_img_dir / original_name
             if src.exists():
                 shutil.move(str(src), str(dst))
-            # Update file path in record to be relative to dataset root
-            img_rec["file_name"] = f"images/{split_name}/{img_rec['file_name']}"
+            img_rec["file_name"] = f"images/{split_name}/{original_name}"
 
         # Build and save COCO JSON
         coco = build_split_coco(records, split_name)

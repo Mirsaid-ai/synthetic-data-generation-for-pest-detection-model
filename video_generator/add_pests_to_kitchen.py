@@ -47,8 +47,9 @@ import os
 CATEGORIES = [
     {"id": 1, "name": "mouse",      "supercategory": "pest"},
     {"id": 2, "name": "cockroach",  "supercategory": "pest"},
+    {"id": 3, "name": "rat",        "supercategory": "pest"},
 ]
-CAT_ID = {"mouse": 1, "cockroach": 2}
+CAT_ID = {"mouse": 1, "cockroach": 2, "rat": 3}
 
 
 # ─────────────────────────────────────────────
@@ -204,7 +205,73 @@ def draw_cockroach(base_size, frame_idx, angle_deg, scale=1.0):
     return img
 
 
-SPRITE_FNS = {"mouse": draw_mouse, "cockroach": draw_cockroach}
+def draw_rat(base_size, frame_idx, angle_deg, scale=1.0):
+    """Rat sprite -- larger and darker than mouse, with thicker tail and coarser features."""
+    c = max(16, int(base_size * scale))
+    img = np.zeros((c, c, 4), dtype=np.uint8)
+    cx, cy = c // 2, c // 2
+    r = int(c * 0.24)
+    if r < 2:
+        return img
+
+    FUR   = (50,  50,  65, 255)
+    BELLY = (90,  90, 110, 255)
+    EAR   = (80,  50,  90, 255)
+    PINK  = (120, 70, 160, 255)
+    EYE   = (10,  10,  10, 255)
+    NOSE  = (80,  60, 150, 255)
+    TAIL  = (70,  55,  80, 255)
+
+    def fc(fx, fy, radius, color):
+        if radius < 1: return
+        cv2.circle(img, (int(fx), int(fy)), int(radius), color[:3], -1, cv2.LINE_AA)
+        m = np.zeros(img.shape[:2], dtype=np.uint8)
+        cv2.circle(m, (int(fx), int(fy)), int(radius), 255, -1, cv2.LINE_AA)
+        img[:, :, 3] = np.where(m > 0, color[3], img[:, :, 3])
+
+    def la(p1, p2, color, t):
+        cv2.line(img, p1, p2, color[:3], max(1, t), cv2.LINE_AA)
+
+    ar = math.radians(angle_deg)
+    ca, sa = math.cos(ar), math.sin(ar)
+    def rot(dx, dy): return int(cx+dx*ca-dy*sa), int(cy+dx*sa+dy*ca)
+
+    sway = math.sin(frame_idx * 0.2) * r * 0.6
+    tp = [rot(-r*1.3-(i/15)*r*2.8, sway*(i/15)**2) for i in range(16)]
+    for i in range(15):
+        la(tp[i], tp[i+1], TAIL, max(1, int((1-i/15)*r*0.25)))
+
+    for t in np.linspace(-0.55, 0.55, 14):
+        bx, by = rot(t*r*1.8, 0)
+        fc(bx, by, int(r*(1.1-0.3*abs(t/0.55))), FUR)
+    for t in np.linspace(-0.3, 0.3, 7):
+        bx, by = rot(t*r*1.1, 0)
+        fc(bx, by, int(r*0.5*(1-0.4*abs(t/0.3))), BELLY)
+
+    for s in (-1, 1):
+        ex, ey = rot(r*0.65, s*r*0.95)
+        fc(ex, ey, int(r*0.32), EAR)
+        fc(ex, ey, int(r*0.18), PINK)
+
+    fc(*rot(r*1.05, 0), int(r*0.72), FUR)
+
+    for s in (-1, 1):
+        ex, ey = rot(r*1.15, s*r*0.35)
+        fc(ex, ey, int(r*0.14), EYE)
+        fc(ex-1, ey-1, max(1, int(r*0.05)), (255,255,255,255))
+
+    fc(*rot(r*1.65, 0), int(r*0.14), NOSE)
+
+    wig = math.sin(frame_idx*0.45)*3
+    for lx, ly, w_ in [(0.35,1.0,wig),(0.35,-1.0,-wig),
+                        (-0.15,0.95,-wig),(-0.15,-0.95,wig),
+                        (-0.55,0.85,wig),(-0.55,-0.85,-wig)]:
+        la(rot(lx*r, ly*r), rot(lx*r, (ly+w_*0.1)*r*1.5), FUR, max(1,int(r*0.2)))
+
+    return img
+
+
+SPRITE_FNS = {"mouse": draw_mouse, "cockroach": draw_cockroach, "rat": draw_rat}
 
 
 # ─────────────────────────────────────────────
@@ -263,27 +330,32 @@ def sprite_to_bbox_and_mask(sprite_bgra, cx, cy, img_w, img_h):
 
 def mask_to_rle(binary_mask):
     """
-    Encode a binary mask as COCO RLE (run-length encoding).
-    Returns {"counts": [...], "size": [H, W]}.
-    Column-major (Fortran order) as per COCO spec.
+    Encode a binary mask as COCO-standard compressed RLE using pycocotools.
+    Falls back to uncompressed RLE if pycocotools is not installed.
     """
-    h, w = binary_mask.shape
-    flat = binary_mask.flatten(order="F").tolist()
-    counts = []
-    current = 0
-    count = 0
-    for px in flat:
-        if px == current:
-            count += 1
-        else:
-            counts.append(count)
-            count = 1
-            current = px
-    counts.append(count)
-    # COCO RLE must start with a run of 0s
-    if flat[0] != 0:
-        counts = [0] + counts
-    return {"counts": counts, "size": [h, w]}
+    try:
+        import pycocotools.mask as mask_util
+        fortran_mask = np.asfortranarray(binary_mask.astype(np.uint8))
+        rle = mask_util.encode(fortran_mask)
+        rle["counts"] = rle["counts"].decode("utf-8")
+        return rle
+    except ImportError:
+        h, w = binary_mask.shape
+        flat = binary_mask.flatten(order="F").tolist()
+        counts = []
+        current = 0
+        count = 0
+        for px in flat:
+            if px == current:
+                count += 1
+            else:
+                counts.append(count)
+                count = 1
+                current = px
+        counts.append(count)
+        if flat[0] != 0:
+            counts = [0] + counts
+        return {"counts": counts, "size": [h, w]}
 
 
 def mask_to_polygon(binary_mask):
@@ -483,7 +555,7 @@ class PestAgent:
         angle = self.prev_angle
 
         if self.depth_map is not None:
-            d = depth_at(self.depth_map, int(px), int(py))
+            d = 1.0 - depth_at(self.depth_map, int(px), int(py))
         else:
             d = py / img_h
         persp_scale = float(np.clip(0.35 + 0.65 * d, 0.15, 1.0))
@@ -548,7 +620,7 @@ def main():
         if n_floor == 0:
             print("[ERROR] Floor mask is empty."); sys.exit(1)
     elif depth_map is not None:
-        floor_mask = depth_map > floor_thresh
+        floor_mask = depth_map < floor_thresh
     else:
         print("[INFO] No mask/depth — full image is walkable")
 
