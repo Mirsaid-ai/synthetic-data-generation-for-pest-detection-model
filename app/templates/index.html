@@ -1,0 +1,904 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Synthetic Pest Video Generator</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>Synthetic Pest Video Generator</h1>
+
+        <div class="tabs">
+            <a class="tab {% if active_tab == 'generate' %}active{% endif %}" href="{{ url_for('index') }}">Test Video Generator</a>
+            <a class="tab {% if active_tab == 'real_generator' %}active{% endif %}" href="{{ url_for('real_generator') }}">Real Video Generator</a>
+            <a class="tab {% if active_tab == 'curator' %}active{% endif %}" href="{{ url_for('curator') }}">Kitchen Curator</a>
+            <a class="tab {% if active_tab == 'kitchen_generator' %}active{% endif %}" href="{{ url_for('kitchen_generator') }}">Kitchen Generator</a>
+        </div>
+
+        {% with messages = get_flashed_messages() %}
+        {% if messages %}
+        <div class="flash">
+            {% for message in messages %}
+            <p>{{ message }}</p>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endwith %}
+
+        {# ================================================================== #}
+        {# REAL VIDEO GENERATOR TAB                                           #}
+        {# ================================================================== #}
+        {% if active_tab == 'real_generator' %}
+        <p class="subtitle">Generate training jobs from all curated kitchens. Frames + labels are always saved; MP4 output is optional.</p>
+
+        <div class="realgen-panel">
+            <form action="{{ url_for('real_generator_generate') }}" method="post" class="realgen-form">
+                <input type="hidden" name="rpage" value="{{ real_curated_page|default(1) }}">
+                <div class="realgen-row">
+                    <label class="realgen-field">
+                        <span>Length (seconds)</span>
+                        <input
+                            type="number"
+                            step="0.5"
+                            min="0.5"
+                            name="length_seconds"
+                            value="{{ real_form_values.length_seconds if real_form_values else 30 }}"
+                            required
+                        >
+                    </label>
+                    <label class="realgen-field">
+                        <span>FPS</span>
+                        <input
+                            type="number"
+                            min="1"
+                            name="fps"
+                            value="{{ real_form_values.fps if real_form_values else 10 }}"
+                            required
+                        >
+                    </label>
+                    <label class="realgen-field">
+                        <span>Number of videos</span>
+                        <input
+                            type="number"
+                            min="1"
+                            name="num_videos"
+                            value="{{ real_form_values.num_videos if real_form_values else 5 }}"
+                            required
+                        >
+                    </label>
+                </div>
+                <label class="realgen-checkbox">
+                    <input
+                        type="checkbox"
+                        name="generate_mp4"
+                        value="1"
+                        {% if real_form_values and real_form_values.generate_mp4 %}checked{% endif %}
+                    >
+                    <span>Also generate MP4 files in <code>outputs/train/videos/</code> or <code>outputs/test/videos/</code></span>
+                </label>
+
+                {% if real_curated_total %}
+                <p class="curated-meta" style="margin-top:0.3rem;">
+                    Using all curated images: <strong>{{ real_curated_total }}</strong>.
+                    If requested videos exceed this, kitchens are sampled randomly with replacement.
+                </p>
+                {% else %}
+                <p class="subtitle" style="margin-top:0.5rem;">No curated images found yet. Add some in Kitchen Curator or upload below.</p>
+                {% endif %}
+
+                <button type="submit" class="btn" style="margin-top:0.9rem;">Generate Real Training Batch</button>
+            </form>
+        </div>
+
+        <div class="realgen-upload">
+            <h3>Upload Directly To Curated</h3>
+            <form action="{{ url_for('real_generator_upload') }}" method="post" enctype="multipart/form-data" class="upload-form">
+                <input type="hidden" name="rpage" value="{{ real_curated_page|default(1) }}">
+                <label for="realgen-upload-input" class="file-label">Choose image(s)
+                    <input id="realgen-upload-input" type="file" name="images" accept="image/*" multiple>
+                </label>
+                <button type="submit" class="btn btn-secondary">Upload To curated_img/</button>
+            </form>
+        </div>
+
+        {% if real_batch_id %}
+        <hr>
+        <h2>Real Batch Results</h2>
+        <div
+            id="realgen-progress-panel"
+            class="realgen-progress-panel"
+            data-status-url="{{ url_for('real_generator_status', batch_id=real_batch_id) }}"
+        >
+            <p id="realgen-progress-text" class="realgen-progress-text">Initializing batch...</p>
+            <div class="realgen-progress-track">
+                <div id="realgen-progress-fill" class="realgen-progress-fill" style="width: {{ real_batch_progress_pct|default(0) }}%;"></div>
+            </div>
+        </div>
+
+        <p id="realgen-summary" class="curated-meta"></p>
+        <p id="realgen-storage-note" class="curated-meta"></p>
+        <p class="curated-meta">Generated state: <code>{{ real_batch_state_path }}</code></p>
+
+        <div id="realgen-error" class="flash" {% if not real_batch_error %}style="display:none;"{% endif %}>
+            <p id="realgen-error-text">{{ real_batch_error }}</p>
+        </div>
+
+        <div class="realgen-results-table-wrap">
+            <table class="realgen-results-table">
+                <thead>
+                    <tr>
+                        <th>job_id</th>
+                        <th>video_id</th>
+                        <th>kitchen_id</th>
+                        <th>length (s)</th>
+                        <th>fps</th>
+                        <th>mouse</th>
+                        <th>rat</th>
+                        <th>cockroach</th>
+                        <th>time (s)</th>
+                    </tr>
+                </thead>
+                <tbody id="realgen-results-body"></tbody>
+            </table>
+        </div>
+
+        <p id="realgen-results-empty" class="curated-meta" style="display:none;"></p>
+
+        <div id="realgen-pagination" class="curated-pagination" style="display:none;">
+            <button id="realgen-prev-btn" type="button" class="btn btn-muted">&larr; Prev 5</button>
+            <span id="realgen-page-label" class="curated-page-label"></span>
+            <button id="realgen-next-btn" type="button" class="btn btn-muted">Next 5 &rarr;</button>
+        </div>
+
+        <div id="realgen-failures" class="flash" style="display:none;"></div>
+
+        <script>
+        (function() {
+            const progressPanel = document.getElementById("realgen-progress-panel");
+            if (!progressPanel) return;
+
+            const statusUrl = progressPanel.dataset.statusUrl;
+            const progressText = document.getElementById("realgen-progress-text");
+            const progressFill = document.getElementById("realgen-progress-fill");
+            const summaryEl = document.getElementById("realgen-summary");
+            const storageNoteEl = document.getElementById("realgen-storage-note");
+            const tbody = document.getElementById("realgen-results-body");
+            const emptyEl = document.getElementById("realgen-results-empty");
+            const paginationEl = document.getElementById("realgen-pagination");
+            const pageLabelEl = document.getElementById("realgen-page-label");
+            const prevBtn = document.getElementById("realgen-prev-btn");
+            const nextBtn = document.getElementById("realgen-next-btn");
+            const failuresEl = document.getElementById("realgen-failures");
+            const errorBoxEl = document.getElementById("realgen-error");
+            const errorTextEl = document.getElementById("realgen-error-text");
+
+            const PAGE_SIZE = 5;
+            let currentPage = 1;
+            let state = {
+                requested: {{ real_batch_requested|default(0)|tojson }},
+                completed: {{ real_batch_completed|default(0)|tojson }},
+                generated: {{ real_batch_generated|default(0)|tojson }},
+                workers: {{ real_batch_workers|default(1)|tojson }},
+                batch_time: {{ real_batch_time|default(None)|tojson }},
+                done: {{ real_batch_done|default(False)|tojson }},
+                progress_pct: {{ real_batch_progress_pct|default(0)|tojson }},
+                generate_mp4: {{ real_batch_generate_mp4|default(False)|tojson }},
+                failures: {{ real_batch_failures|default([])|tojson }},
+                results: {{ real_batch_results|default([])|tojson }},
+                error: {{ real_batch_error|default(None)|tojson }},
+            };
+
+            function escapeHtml(text) {
+                const div = document.createElement("div");
+                div.textContent = text == null ? "" : String(text);
+                return div.innerHTML;
+            }
+
+            function renderSummary() {
+                const requested = Number(state.requested || 0);
+                const completed = Number(state.completed || 0);
+                const generated = Number(state.generated || 0);
+                const workers = Number(state.workers || 1);
+                const progressPct = Math.max(0, Math.min(100, Number(state.progress_pct || 0)));
+                progressFill.style.width = `${progressPct}%`;
+
+                if (state.done) {
+                    const batchTime = state.batch_time != null ? `${state.batch_time}s` : "n/a";
+                    progressText.textContent = `Completed ${completed}/${requested} (${progressPct}%).`;
+                    summaryEl.textContent = `Generated ${generated} / ${requested} job(s) using ${workers} worker(s) in ${batchTime}.`;
+                } else {
+                    progressText.textContent = `Running: ${completed}/${requested} completed (${progressPct}%).`;
+                    summaryEl.textContent = `Batch is running with ${workers} worker(s).`;
+                }
+
+                if (state.generate_mp4) {
+                    storageNoteEl.innerHTML = "Outputs are written to split-specific directories under <code>outputs/train/</code> and <code>outputs/test/</code>, including <code>frames</code>, <code>labels</code>, and <code>videos</code>.";
+                } else {
+                    storageNoteEl.innerHTML = "No MP4 is generated in this batch. Training data is written to split-specific <code>outputs/train/</code> and <code>outputs/test/</code> frame and label directories.";
+                }
+            }
+
+            function renderFailures() {
+                const failures = Array.isArray(state.failures) ? state.failures : [];
+                if (!failures.length) {
+                    failuresEl.style.display = "none";
+                    failuresEl.innerHTML = "";
+                    return;
+                }
+                failuresEl.style.display = "block";
+                failuresEl.innerHTML = failures.map((msg) => `<p>${escapeHtml(msg)}</p>`).join("");
+            }
+
+            function renderError() {
+                if (!state.error) {
+                    errorBoxEl.style.display = "none";
+                    errorTextEl.textContent = "";
+                    return;
+                }
+                errorBoxEl.style.display = "block";
+                errorTextEl.textContent = state.error;
+            }
+
+            function renderTable() {
+                const results = Array.isArray(state.results) ? state.results : [];
+                if (!results.length) {
+                    tbody.innerHTML = "";
+                    paginationEl.style.display = "none";
+                    emptyEl.style.display = "block";
+                    emptyEl.textContent = state.done
+                        ? "No successful jobs in this batch."
+                        : "Batch running... rows will appear when jobs complete.";
+                    return;
+                }
+
+                emptyEl.style.display = "none";
+                const totalPages = Math.max(1, Math.ceil(results.length / PAGE_SIZE));
+                currentPage = Math.max(1, Math.min(currentPage, totalPages));
+                const start = (currentPage - 1) * PAGE_SIZE;
+                const pageRows = results.slice(start, start + PAGE_SIZE);
+
+                tbody.innerHTML = pageRows.map((item) => `
+                    <tr>
+                        <td><code>${escapeHtml(item.job_id)}</code></td>
+                        <td><code>${escapeHtml(item.video_id)}</code></td>
+                        <td><code>${escapeHtml(item.kitchen_id)}</code></td>
+                        <td>${escapeHtml(item.length_seconds)}</td>
+                        <td>${escapeHtml(item.fps)}</td>
+                        <td>${escapeHtml(item.mouse_count)}</td>
+                        <td>${escapeHtml(item.rat_count)}</td>
+                        <td>${escapeHtml(item.cockroach_count)}</td>
+                        <td>${escapeHtml(item.render_time)}</td>
+                    </tr>
+                `).join("");
+
+                paginationEl.style.display = totalPages > 1 ? "flex" : "none";
+                pageLabelEl.textContent = `Page ${currentPage} / ${totalPages}`;
+                prevBtn.disabled = currentPage <= 1;
+                nextBtn.disabled = currentPage >= totalPages;
+            }
+
+            function applyState(nextState) {
+                state = Object.assign({}, state, nextState || {});
+                renderSummary();
+                renderError();
+                renderFailures();
+                renderTable();
+            }
+
+            async function pollStatus() {
+                try {
+                    const resp = await fetch(statusUrl, { cache: "no-store" });
+                    if (!resp.ok) return;
+                    const data = await resp.json();
+                    if (data && !data.error) {
+                        applyState(data);
+                        if (data.done) return;
+                    }
+                } catch (e) {
+                    // Keep the latest UI state and retry.
+                }
+                setTimeout(pollStatus, 1500);
+            }
+
+            prevBtn.addEventListener("click", function() {
+                currentPage = Math.max(1, currentPage - 1);
+                renderTable();
+            });
+            nextBtn.addEventListener("click", function() {
+                currentPage = currentPage + 1;
+                renderTable();
+            });
+
+            applyState(state);
+            if (!state.done) {
+                pollStatus();
+            }
+        })();
+        </script>
+        {% endif %}
+
+        {# ================================================================== #}
+        {# KITCHEN CURATOR TAB                                                #}
+        {# ================================================================== #}
+        {% elif active_tab == 'curator' %}
+        <p class="subtitle">Review downloaded kitchen images. Keep moves them to <code>curated_img/</code>; Delete removes them permanently.</p>
+
+        <div class="curator-toolbar">
+            <p
+                id="download-status"
+                class="download-status {% if download_running %}running{% endif %}"
+                data-running="{{ '1' if download_running else '0' }}"
+                {% if not download_message %}style="display:none;"{% endif %}
+            >
+                {{ download_message }}
+            </p>
+            <form id="download-more-form" action="{{ url_for('download_more') }}" method="post" style="display:inline;">
+                <label style="display:inline-flex; align-items:center; gap:0.4rem; margin-right:0.5rem; color:#495057; font-size:0.9rem;">
+                    Count
+                    <input
+                        id="download-count-input"
+                        type="number"
+                        name="download_count"
+                        min="1"
+                        value="{{ curator_download_default|default(100) }}"
+                        style="width:90px; padding:0.3rem 0.45rem; border:1px solid #ced4da; border-radius:4px;"
+                        {% if download_running %}disabled{% endif %}
+                    >
+                </label>
+                <button id="download-more-btn" type="submit" class="btn btn-secondary" {% if download_running %}disabled{% endif %}>
+                    &#x2B07; Download More Images
+                </button>
+            </form>
+        </div>
+
+        <script>
+        (function() {
+            const statusEl = document.getElementById("download-status");
+            if (!statusEl) return;
+            const countInput = document.getElementById("download-count-input");
+            const button = document.getElementById("download-more-btn");
+            let hadRunning = statusEl.dataset.running === "1";
+
+            function setRunning(running) {
+                if (button) button.disabled = running;
+                if (countInput) countInput.disabled = running;
+                statusEl.classList.toggle("running", running);
+            }
+
+            async function pollStatus() {
+                try {
+                    const resp = await fetch("{{ url_for('download_status') }}", {cache: "no-store"});
+                    if (!resp.ok) return;
+                    const data = await resp.json();
+                    const running = !!data.running;
+                    statusEl.textContent = data.message || "";
+                    statusEl.style.display = data.message ? "block" : "none";
+                    setRunning(running);
+
+                    if (hadRunning && !running) {
+                        window.location.href = "{{ url_for('curator') }}";
+                        return;
+                    }
+                    hadRunning = running;
+                } catch (e) {
+                    // keep current status if poll fails
+                }
+            }
+
+            setRunning(hadRunning);
+            pollStatus();
+            setInterval(pollStatus, 2000);
+        })();
+        </script>
+
+        {% if curator_total and curator_current %}
+        <div class="curator-panel">
+            <p class="curator-meta">Image {{ curator_idx + 1 }} of {{ curator_total }} (uncurated)</p>
+            <p class="curator-filename">{{ curator_current }}</p>
+            <div class="curator-image-frame">
+                <img
+                    class="curator-image"
+                    src="{{ url_for('serve_kitchen_image', filename=curator_current) }}"
+                    alt="{{ curator_current }}"
+                >
+            </div>
+            {% if curator_analysis_error %}
+            <p class="curator-analysis-error">{{ curator_analysis_error }}</p>
+            {% endif %}
+            {% if curator_depth_preview_url or curator_surface_preview_url %}
+            <div class="curator-analysis-row">
+                {% if curator_depth_preview_url %}
+                <div class="curator-analysis-card">
+                    <p><strong>Predicted Depth</strong></p>
+                    <img src="{{ curator_depth_preview_url }}" alt="curator depth preview">
+                </div>
+                {% endif %}
+                {% if curator_surface_preview_url %}
+                <div class="curator-analysis-card">
+                    <p><strong>Surface Normals</strong></p>
+                    <img src="{{ curator_surface_preview_url }}" alt="curator surface normals preview">
+                </div>
+                {% endif %}
+            </div>
+            {% endif %}
+
+            <form action="{{ url_for('curator_action') }}" method="post" class="curator-actions">
+                <input type="hidden" name="filename" value="{{ curator_current }}">
+                <input type="hidden" name="idx" value="{{ curator_idx }}">
+                <button type="submit" name="action" value="keep" class="btn btn-success">
+                    &#x2713; Keep &amp; Next
+                </button>
+                <button
+                    type="submit"
+                    name="action"
+                    value="delete"
+                    class="btn btn-danger"
+                    onclick="return confirm('Delete this image? It will be marked as seen and never re-downloaded.')"
+                >
+                    &#x2715; Delete
+                </button>
+            </form>
+
+            <div class="curator-nav">
+                <a
+                    class="btn btn-muted {% if curator_idx <= 0 %}disabled-link{% endif %}"
+                    href="{{ url_for('curator', idx=curator_idx - 1) if curator_idx > 0 else '#' }}"
+                >
+                    &larr; Prev
+                </a>
+                <a
+                    class="btn btn-muted {% if curator_idx >= curator_total - 1 %}disabled-link{% endif %}"
+                    href="{{ url_for('curator', idx=curator_idx + 1) if curator_idx < curator_total - 1 else '#' }}"
+                >
+                    Next &rarr;
+                </a>
+            </div>
+        </div>
+        {% else %}
+        <div class="curator-empty">
+            <p class="subtitle">No uncurated kitchen images found.</p>
+            <p style="color:#666; margin-bottom:1rem;">Use the button above to download images from Places365, or switch to the <a href="{{ url_for('kitchen_generator') }}">Kitchen Generator</a> tab to create images with Gemini.</p>
+        </div>
+        {% endif %}
+
+        {# ================================================================== #}
+        {# KITCHEN GENERATOR TAB (Gemini)                                     #}
+        {# ================================================================== #}
+        {% elif active_tab == 'kitchen_generator' %}
+        <p class="subtitle">Generate photorealistic kitchen images using Google Gemini. Kept images are saved to <code>curated_img/</code>.</p>
+
+        {# --- API Key status widget --- #}
+        <div class="apikey-widget">
+            {% if gemini_key.set %}
+            <div class="apikey-status apikey-ok">
+                <span>&#x2713; Gemini API key set &nbsp;<code>{{ gemini_key.masked }}</code></span>
+                <button class="btn-link" onclick="document.getElementById('apikey-form').style.display=document.getElementById('apikey-form').style.display==='none'?'flex':'none'">Change</button>
+            </div>
+            {% else %}
+            <div class="apikey-status apikey-missing">
+                <span>&#x26A0; No Gemini API key — generation is disabled.</span>
+                <button class="btn-link" onclick="document.getElementById('apikey-form').style.display='flex'">Add key</button>
+            </div>
+            {% endif %}
+            <form id="apikey-form" action="{{ url_for('kitchen_generator_set_api_key') }}" method="post"
+                  class="apikey-form" style="display:{% if not gemini_key.set %}flex{% else %}none{% endif %};">
+                <input type="password" name="api_key" class="apikey-input" placeholder="AIza..." autocomplete="off" required>
+                <button type="submit" class="btn">Save</button>
+                <button type="button" class="btn btn-muted" onclick="this.closest('form').style.display='none'">Cancel</button>
+            </form>
+        </div>
+
+        <div class="kgen-panel">
+            <div class="kgen-form-row">
+                <div class="kgen-prompt-group">
+                    <label for="kgen-template" class="kgen-label">Prompt template</label>
+                    <select id="kgen-template" class="kgen-select">
+                        <option value="">— custom prompt below —</option>
+                        {% for tmpl in prompt_templates %}
+                        <option value="{{ tmpl }}">{{ tmpl[:80] }}{% if tmpl|length > 80 %}…{% endif %}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="kgen-prompt-group">
+                    <label for="kgen-custom" class="kgen-label">Custom prompt (or edit template above)</label>
+                    <textarea id="kgen-custom" class="kgen-textarea" rows="2" placeholder="e.g. Large commercial kitchen, white tile floor, overhead fluorescent lights..."></textarea>
+                </div>
+                <button id="kgen-btn" class="btn" onclick="kgenGenerate()">&#x2728; Generate</button>
+            </div>
+            <p id="kgen-status" class="kgen-status" style="display:none;"></p>
+        </div>
+
+        <div id="kgen-result" style="display:none;">
+            <hr>
+            <div class="kgen-result-grid">
+                <div class="kgen-result-card">
+                    <p><strong>Generated Kitchen</strong></p>
+                    <img id="kgen-img" src="" alt="Generated kitchen" class="kgen-preview-img">
+                </div>
+                <div id="kgen-depth-card" class="kgen-result-card" style="display:none;">
+                    <p><strong>Predicted Depth</strong></p>
+                    <img id="kgen-depth" src="" alt="Depth map" class="kgen-preview-img">
+                </div>
+                <div id="kgen-surface-card" class="kgen-result-card" style="display:none;">
+                    <p><strong>Surface Normals</strong></p>
+                    <img id="kgen-surface" src="" alt="Surface normals" class="kgen-preview-img">
+                </div>
+            </div>
+
+            <form id="kgen-save-form" action="{{ url_for('kitchen_generator_save') }}" method="post" style="display:inline;">
+                <input type="hidden" id="kgen-temp-filename" name="temp_filename" value="">
+                <button type="submit" class="btn btn-success">&#x2713; Keep — Save to curated_img/</button>
+            </form>
+            <form id="kgen-discard-form" action="{{ url_for('kitchen_generator_discard') }}" method="post" style="display:inline; margin-left:0.5rem;">
+                <input type="hidden" id="kgen-discard-filename" name="temp_filename" value="">
+                <button type="submit" class="btn btn-danger" onclick="return confirm('Discard this generated image?')">&#x2715; Discard</button>
+            </form>
+        </div>
+
+        <script>
+        document.getElementById("kgen-template").addEventListener("change", function() {
+            const val = this.value;
+            if (val) {
+                document.getElementById("kgen-custom").value = val;
+            }
+        });
+
+        function kgenGenerate() {
+            const prompt = document.getElementById("kgen-custom").value.trim();
+            if (!prompt) {
+                alert("Please enter a prompt.");
+                return;
+            }
+            const btn = document.getElementById("kgen-btn");
+            const status = document.getElementById("kgen-status");
+            const result = document.getElementById("kgen-result");
+
+            btn.disabled = true;
+            status.style.display = "block";
+            status.textContent = "Generating image with Gemini… this may take 15-30 seconds.";
+            result.style.display = "none";
+
+            fetch("{{ url_for('kitchen_generator_generate') }}", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({prompt: prompt}),
+            })
+            .then(r => r.json())
+            .then(data => {
+                btn.disabled = false;
+                if (data.error) {
+                    status.textContent = "Error: " + data.error;
+                    return;
+                }
+                status.style.display = "none";
+                document.getElementById("kgen-img").src = data.image_url;
+                document.getElementById("kgen-temp-filename").value = data.temp_filename;
+                document.getElementById("kgen-discard-filename").value = data.temp_filename;
+
+                if (data.depth_url) {
+                    document.getElementById("kgen-depth").src = data.depth_url;
+                    document.getElementById("kgen-depth-card").style.display = "block";
+                } else {
+                    document.getElementById("kgen-depth-card").style.display = "none";
+                }
+                if (data.surface_url) {
+                    document.getElementById("kgen-surface").src = data.surface_url;
+                    document.getElementById("kgen-surface-card").style.display = "block";
+                } else {
+                    document.getElementById("kgen-surface-card").style.display = "none";
+                }
+
+                result.style.display = "block";
+            })
+            .catch(err => {
+                btn.disabled = false;
+                status.textContent = "Request failed: " + err;
+            });
+        }
+        </script>
+
+        {# ================================================================== #}
+        {# GENERATOR TAB (Pest Video Generation)                              #}
+        {# ================================================================== #}
+        {% else %}
+        <p class="subtitle">Test Video Generator: choose from your curated kitchens, or upload a new image.</p>
+
+        <div class="realgen-panel">
+            <form onsubmit="return false;" class="realgen-form">
+                <div class="realgen-row">
+                    <label class="realgen-field">
+                        <span>Length (seconds)</span>
+                        <input
+                            id="test-length-seconds"
+                            type="number"
+                            step="0.5"
+                            min="0.5"
+                            value="{{ test_form_values.length_seconds if test_form_values else 24 }}"
+                            required
+                        >
+                    </label>
+                    <label class="realgen-field">
+                        <span>FPS</span>
+                        <input
+                            id="test-fps"
+                            type="number"
+                            min="1"
+                            value="{{ test_form_values.fps if test_form_values else 10 }}"
+                            required
+                        >
+                    </label>
+                </div>
+            </form>
+        </div>
+
+        <div class="curated-picker">
+            <h3>Generate From Curated Kitchens</h3>
+            {% if curated_total and curated_page_images %}
+            <p class="curated-meta">
+                Showing {{ curated_page_images|length }} of {{ curated_total }}
+                (page {{ curated_page }} / {{ curated_total_pages }})
+            </p>
+            <div class="curated-grid">
+                {% for image_name in curated_page_images %}
+                <div class="curated-card">
+                    <div class="curated-card-frame">
+                        <img
+                            src="{{ url_for('serve_curated_image', filename=image_name) }}"
+                            alt="{{ image_name }}"
+                        >
+                    </div>
+                    <p class="curated-card-name">{{ image_name }}</p>
+                    <form action="{{ url_for('generate_from_curated') }}" method="post" class="testgen-submit">
+                        <input type="hidden" name="filename" value="{{ image_name }}">
+                        <input type="hidden" name="page" value="{{ curated_page }}">
+                        <input type="hidden" name="length_seconds" class="testgen-length-input" value="{{ test_form_values.length_seconds if test_form_values else 24 }}">
+                        <input type="hidden" name="fps" class="testgen-fps-input" value="{{ test_form_values.fps if test_form_values else 10 }}">
+                        <button type="submit" class="btn">Generate Video</button>
+                    </form>
+                </div>
+                {% endfor %}
+            </div>
+            <div class="curated-pagination">
+                <a
+                    class="btn btn-muted {% if not curated_has_prev %}disabled-link{% endif %}"
+                    href="{{ url_for('index', page=curated_prev_page) if curated_has_prev else '#' }}"
+                >
+                    Prev 5
+                </a>
+                <span class="curated-page-label">Page {{ curated_page }} / {{ curated_total_pages }}</span>
+                <a
+                    class="btn btn-muted {% if not curated_has_next %}disabled-link{% endif %}"
+                    href="{{ url_for('index', page=curated_next_page) if curated_has_next else '#' }}"
+                >
+                    Next 5
+                </a>
+            </div>
+            {% else %}
+            <p class="subtitle">No curated kitchen images found. Use the <a href="{{ url_for('curator') }}">Kitchen Curator</a> or <a href="{{ url_for('kitchen_generator') }}">Kitchen Generator</a> to add some.</p>
+            {% endif %}
+        </div>
+
+        <hr>
+        <p class="subtitle">Or Upload A New Kitchen Image</p>
+        <form action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data" class="upload-form testgen-submit">
+            <input type="hidden" name="page" value="{{ curated_page|default(1) }}">
+            <input type="hidden" name="length_seconds" class="testgen-length-input" value="{{ test_form_values.length_seconds if test_form_values else 24 }}">
+            <input type="hidden" name="fps" class="testgen-fps-input" value="{{ test_form_values.fps if test_form_values else 10 }}">
+            <label for="image" class="file-label" id="file-label">
+                Choose kitchen image
+                <input type="file" id="image" name="image" accept="image/*">
+            </label>
+            <span id="file-name" class="file-name"></span>
+            <button type="submit" class="btn" id="generate-btn" disabled>Generate Video</button>
+        </form>
+        <img id="preview" class="preview-img" style="display:none;" alt="preview">
+
+        <script>
+            (function() {
+                const lengthInput = document.getElementById("test-length-seconds");
+                const fpsInput = document.getElementById("test-fps");
+                const lengthTargets = document.querySelectorAll(".testgen-length-input");
+                const fpsTargets = document.querySelectorAll(".testgen-fps-input");
+                const forms = document.querySelectorAll("form.testgen-submit");
+
+                function syncConfig() {
+                    if (!lengthInput || !fpsInput) return;
+                    const lengthVal = lengthInput.value || "30";
+                    const fpsVal = fpsInput.value || "10";
+                    lengthTargets.forEach((el) => { el.value = lengthVal; });
+                    fpsTargets.forEach((el) => { el.value = fpsVal; });
+                }
+
+                syncConfig();
+                if (lengthInput) lengthInput.addEventListener("input", syncConfig);
+                if (fpsInput) fpsInput.addEventListener("input", syncConfig);
+                forms.forEach((form) => form.addEventListener("submit", syncConfig));
+            })();
+
+            const imageInput = document.getElementById("image");
+            if (imageInput) {
+                imageInput.addEventListener("change", function() {
+                    const file = this.files[0];
+                    const nameEl = document.getElementById("file-name");
+                    const btn = document.getElementById("generate-btn");
+                    const preview = document.getElementById("preview");
+                    const label = document.getElementById("file-label");
+                    if (file) {
+                        nameEl.textContent = file.name;
+                        btn.disabled = false;
+                        label.classList.add("file-selected");
+                        const reader = new FileReader();
+                        reader.onload = function(e) {
+                            preview.src = e.target.result;
+                            preview.style.display = "block";
+                        };
+                        reader.readAsDataURL(file);
+                    } else {
+                        nameEl.textContent = "";
+                        btn.disabled = true;
+                        label.classList.remove("file-selected");
+                        preview.style.display = "none";
+                    }
+                });
+            }
+        </script>
+
+        {% if job_id %}
+        <hr>
+        <h2>Results: {{ job_id }}</h2>
+        {% if render_time is not none %}
+        <p style="color:#555;">Total render time: <strong>{{ render_time }}s</strong></p>
+        {% endif %}
+
+        <form action="{{ url_for('regenerate', job_id=job_id) }}" method="post" style="margin-bottom:16px;">
+            <input type="hidden" name="page" value="{{ curated_page|default(1) }}">
+            <input type="hidden" name="length_seconds" value="{{ test_form_values.length_seconds if test_form_values else 24 }}">
+            <input type="hidden" name="fps" value="{{ test_form_values.fps if test_form_values else 10 }}">
+            <button type="submit" class="btn">&#x21BA; Regenerate with Same Image</button>
+        </form>
+
+        {% if video_url %}
+        <div class="video-section">
+            <h3>Animated Preview</h3>
+            <div style="margin-bottom:16px;">
+                <p style="margin:0 0 8px 0;"><strong>Generated Video</strong></p>
+                <div class="player-wrapper" style="position:relative; display:inline-block;">
+                    <video id="player" width="640" controls autoplay loop muted>
+                        <source src="{{ video_url }}" type="video/mp4">
+                    </video>
+                    <canvas id="bbox-canvas" width="640" height="480" style="position:absolute; top:0; left:0; pointer-events:none;"></canvas>
+                </div>
+            </div>
+            {% if pest_mask_templates %}
+            <div>
+                <p style="margin:0 0 8px 0;"><strong>Per-Pest Movement Masks</strong>
+                    <span style="font-size:12px; color:#888;">(bright = allowed area, switches surface as pest moves)</span></p>
+                <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-start;">
+                    {% for pest in pest_mask_templates %}
+                    <div>
+                        <p style="margin:0 0 4px 0; font-size:13px;">{{ pest.label }}</p>
+                        <img id="mask-pest{{ pest.pest_idx }}"
+                             src="{{ pest.url_template | replace('NNNN', '0001') }}"
+                             width="310" style="display:block;" alt="{{ pest.label }} movement mask">
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+        </div>
+
+        {% if depth_preview_url or surface_preview_url or gravity_preview_url %}
+        <div class="video-section">
+            <h3>Scene Analysis</h3>
+            <div style="display:flex; gap:16px; align-items:flex-start;">
+                {% if depth_preview_url %}
+                <div style="flex:1 1 0; min-width:0;">
+                    <p style="margin:0 0 8px 0;"><strong>Predicted Depth</strong></p>
+                    <img src="{{ depth_preview_url }}" style="width:100%; display:block;" alt="predicted depth preview">
+                </div>
+                {% endif %}
+                {% if surface_preview_url %}
+                <div style="flex:1 1 0; min-width:0;">
+                    <p style="margin:0 0 8px 0;"><strong>Surface Normals</strong></p>
+                    <img src="{{ surface_preview_url }}" style="width:100%; display:block;" alt="surface normals preview">
+                </div>
+                {% endif %}
+                {% if gravity_preview_url %}
+                <div style="flex:1 1 0; min-width:0;">
+                    <p style="margin:0 0 8px 0;"><strong>Gravity / Camera Up</strong></p>
+                    <img src="{{ gravity_preview_url }}" style="width:100%; display:block;" alt="gravity direction preview">
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+
+        <script>
+            const frameNames = [
+                {% for frame in frames %}
+                "{{ frame }}",
+                {% endfor %}
+            ];
+            const labelsData = {{ labels_json|safe if labels_json else '{}' }};
+            const categoriesData = {{ categories_json|safe if categories_json else '{}' }};
+            const renderWidth = {{ render_width|default(640) }};
+            const renderHeight = {{ render_height|default(480) }};
+            const FPS = {{ playback_fps|default(10) }};
+
+            const PEST_COLORS = {
+                "mouse": "#00ff00",
+                "rat": "#ff6600",
+                "cockroach": "#ff0000",
+            };
+
+            const canvas = document.getElementById("bbox-canvas");
+            const ctx = canvas.getContext("2d");
+
+            function drawBboxes(frameIdx) {
+                const video = document.getElementById("player");
+                const cw = video.offsetWidth || renderWidth;
+                const ch = video.offsetHeight || renderHeight;
+                if (canvas.width !== cw) canvas.width = cw;
+                if (canvas.height !== ch) canvas.height = ch;
+                ctx.clearRect(0, 0, cw, ch);
+
+                const frameName = frameNames[frameIdx];
+                const anns = frameName ? labelsData[frameName] : null;
+                if (!anns || anns.length === 0) return;
+
+                const scaleX = cw / renderWidth;
+                const scaleY = ch / renderHeight;
+
+                for (const ann of anns) {
+                    const [x, y, w, h] = ann.bbox;
+                    const sx = x * scaleX, sy = y * scaleY;
+                    const sw = w * scaleX, sh = h * scaleY;
+
+                    const pestName = categoriesData[String(ann.category_id)] || "unknown";
+                    const color = PEST_COLORS[pestName] || "#ffffff";
+
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(sx, sy, sw, sh);
+
+                    ctx.font = "bold 14px sans-serif";
+                    const textW = ctx.measureText(pestName).width;
+                    ctx.fillStyle = color;
+                    ctx.fillRect(sx, sy - 20, textW + 8, 20);
+                    ctx.fillStyle = "#000";
+                    ctx.fillText(pestName, sx + 4, sy - 5);
+                }
+            }
+
+            const pestMaskTemplates = {
+                {% for pest in pest_mask_templates %}
+                {{ pest.pest_idx }}: "{{ pest.url_template }}",
+                {% endfor %}
+            };
+
+            function updatePestMasks(frameIdx) {
+                const frameNum = String(frameIdx + 1).padStart(4, "0");
+                for (const [idx, tmpl] of Object.entries(pestMaskTemplates)) {
+                    const img = document.getElementById("mask-pest" + idx);
+                    if (img) img.src = tmpl.replace("NNNN", frameNum);
+                }
+            }
+
+            const video = document.getElementById("player");
+            video.addEventListener("timeupdate", function() {
+                const frameIdx = Math.min(
+                    Math.floor(video.currentTime * FPS),
+                    frameNames.length - 1
+                );
+                drawBboxes(frameIdx);
+                updatePestMasks(frameIdx);
+            });
+        </script>
+        {% endif %}
+        {% endif %}
+        {% endif %}
+    </div>
+</body>
+</html>
