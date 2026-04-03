@@ -555,8 +555,10 @@ class PestAgent:
         angle = self.prev_angle
 
         if self.depth_map is not None:
-            d = 1.0 - depth_at(self.depth_map, int(px), int(py))
+            # MiDaS high value = close to camera → larger sprite (correct perspective)
+            d = depth_at(self.depth_map, int(px), int(py))
         else:
+            # Fallback: lower row = closer to camera in a typical floor perspective
             d = py / img_h
         persp_scale = float(np.clip(0.35 + 0.65 * d, 0.15, 1.0))
 

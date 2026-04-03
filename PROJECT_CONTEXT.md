@@ -8,7 +8,10 @@
 
 End-to-end pipeline that generates **fully synthetic, annotated video datasets** for training pest-detection models (mice, cockroaches, rats in kitchens). The goal is to avoid manual data collection and labeling.
 
-**Final test target:** Real CCTV kitchen footage — model must achieve ≥85% recall at 0.5 IoU with ≤15% false positive rate.
+**Final test target:** Real kitchen video footage (camera type TBD — not confirmed CCTV) — model must achieve:
+- **≥80% true detection rate** (recall)
+- **<5% false positive rate** (FPR)
+- Measured per-frame on test video data
 
 ---
 
@@ -62,32 +65,25 @@ kitchen.png
 
 ---
 
-## 4. Known Bugs in `pipeline` Branch
+## 4. Bug Status in `pipeline` Branch
 
-Full details in `CODEBASE_ANALYSIS.md`. Summary:
+### ✅ Fixed
+| # | File | Notes |
+|---|------|-------|
+| 1 | `add_pests_to_kitchen.py` line 558 | **Depth inversion fixed** — removed `1.0 -` from `depth_at()` call; perspective scaling now correct |
+| 2 | `generate_depth_map.py` | JPG input was already safe — uses `Path.with_suffix("")` |
+| 3 | `generate_depth_map.py` | `if __name__` guard already present |
+| 4 | `generate_floor_mask.py` | Depth refinement already uses `< thresh_norm` (correct direction) |
+| 5 | `add_pests_to_kitchen.py` | `mask_to_rle()` already uses pycocotools as primary path |
 
-### 🔴 Critical
+### 🟠 Still Open (lower priority — do not block pipeline)
 | # | File | Issue |
 |---|------|-------|
-| 1 | `add_pests_to_kitchen.py` | `mask_to_rle()` produces non-standard integer-array RLE — breaks pycocotools/Detectron2/YOLO when polygon fallback fails |
-| 2 | `generate_depth_map.py` | Module-level argparse, no `if __name__` guard — file cannot be imported |
-| 3 | `generate_depth_map.py` | `.jpg` input: `.replace(".png","_depth.png")` is a no-op — overwrites the source kitchen image |
-
-### 🟠 High
-| # | File | Issue |
-|---|------|-------|
-| 4 | `generate_floor_mask.py`, `add_pests_to_kitchen.py` | MiDaS depth semantics inverted — `depth > thresh` selects counters/cabinets as floor, not actual floor |
-| 5 | `batch_render.py` | `capture_output=True` swallows all render stdout/stderr; only last stderr line shown on failure |
-
-### 🟡 Medium / Low
-| # | File | Issue |
-|---|------|-------|
-| 6 | `generate_configs.py` | `generate_config()` is a dead stub — always returns `None` |
-| 7 | `generate_depth_map.py`, `generate_floor_mask.py` | No GPU utilization — DPT_Large takes 30–120s/image on CPU vs <2s on GPU |
-| 8 | `add_pests_to_kitchen.py` lines 485–489 | Perspective scale direction inverted (consequence of bug #4) |
-| 9 | `extract_frames.py` | `old_id` computed but never used |
-| 10 | `extract_frames.py` | `img_rec["file_name"]` mutated in-place on shared dict |
-| 11 | All scripts | `floor_thresh` vs `depth_thresh` — same concept named differently everywhere |
+| 6 | `batch_render.py` | `capture_output=True` swallows all render stdout/stderr |
+| 7 | `generate_configs.py` | `generate_config()` dead stub always returns `None` |
+| 8 | `extract_frames.py` | `old_id` computed but never used |
+| 9 | `extract_frames.py` | `img_rec["file_name"]` mutated in-place on shared dict |
+| 10 | All scripts | `floor_thresh` vs `depth_thresh` naming inconsistency |
 
 ---
 
@@ -151,14 +147,18 @@ Full details in `CODEBASE_ANALYSIS.md`. Summary:
 
 ### Realistic Performance Estimates
 
-| Scenario | Expected Recall |
-|----------|----------------|
-| Current pipeline, DETR, no changes | 35–50% |
-| + Merge anubhav_v1 sprites | 45–60% |
-| + CCTV simulation (IR, noise, compression) | 65–75% |
-| + Overhead camera angle fix | +5–8% |
-| + YOLOv8 + better augmentation + 100+ kitchens | **75–83%** |
-| + Any real labeled CCTV frames (200+) | **85–92%** |
+Target: ≥80% recall AND <5% FPR simultaneously.
+
+| Scenario | Recall | FPR | Passes? |
+|----------|--------|-----|---------|
+| Current pipeline, DETR, no changes | 35–50% | ~15–25% | No |
+| + Merge anubhav_v1 sprites | 45–60% | ~10–20% | No |
+| + Real domain augmentation (noise, blur, compression) | 60–72% | ~8–12% | No |
+| + Better model (YOLOv8) + 70+ kitchens + threshold tuning | **72–80%** | **~5–8%** | Borderline |
+| + Negative frames training + calibration | **78–84%** | **<5%** | **Likely yes** |
+| + Any real labeled video frames (200+) | **82–90%** | **<4%** | **Yes** |
+
+**Critical note:** The <5% FPR constraint is the harder one — it's easy to get 80% recall by lowering the confidence threshold, but that blows up FPR. Both must hold simultaneously.
 
 ---
 
@@ -171,28 +171,31 @@ Full details in `CODEBASE_ANALYSIS.md`. Summary:
 - [ ] Merge anubhav_v1 sprite system + depth_estimator into pipeline
 - [ ] Switch video output codec to H.264
 
-### Phase 2 — CCTV Simulation Layer
-Add post-processing to every rendered frame **before** writing to video:
-- [ ] **IR/grayscale mode** (40% of frames) — single highest-impact change
-- [ ] **Sensor noise injection** — Gaussian σ=5–15 per channel
-- [ ] **H.264 compression simulation** — JPEG encode/decode at quality 55–75
+### Phase 2 — Real Video Simulation Layer
+Camera type is TBD (not confirmed CCTV). Simulate a broad range of conditions:
+- [ ] **Sensor noise injection** — Gaussian σ=5–15 (applies to all camera types)
+- [ ] **H.264/JPEG compression simulation** — encode/decode at quality 55–75
 - [ ] **Motion blur on sprites** — directional blur proportional to speed vector
-- [ ] **Resolution downscale** — ÷2 then upsample back (simulates low-res camera)
-- [ ] **Barrel distortion** (optional) — OpenCV remap for wide-angle lens
+- [ ] **Lighting variation** — random brightness/gamma per-video segment
+- [ ] **Resolution downscale** — simulate lower-res capture
+- [ ] **Random grayscale** (30–40% of videos) — covers IR night mode if camera turns out to be CCTV
+- [ ] **Barrel distortion** (optional) — covers wide-angle lenses
 
 ### Phase 3 — Data Scale-Up
 - [ ] Generate 100+ kitchen images with ceiling/overhead CCTV perspective via Gemini prompts
 - [ ] Run batch: 100 kitchens × 30 configs = 3,000 videos
 - [ ] Extract every 3rd frame → ~150K training frames target
 
-### Phase 4 — Model Switch
+### Phase 4 — Model Switch + Threshold Calibration
 - [ ] Replace `facebook/detr-resnet-50` with **YOLOv8m** or **RT-DETR-L**
 - [ ] Upgrade training augmentations:
-  - RandomGrayscale p=0.4 (IR simulation)
+  - RandomGrayscale p=0.3–0.4
   - MotionBlur kernel=3–7
   - JPEG compression q=50–80
   - Mosaic (YOLOv8 built-in, critical for small objects)
   - Perspective warp scale=0.3
+- [ ] **Threshold calibration on held-out val set** — tune confidence threshold to jointly satisfy ≥80% recall AND <5% FPR (they trade off against each other)
+- [ ] **Train with negative frames** (pest-free kitchen frames) — critical for FPR control
 
 ### Phase 5 — Real Data (Game Changer)
 - [ ] Collect any real CCTV kitchen footage

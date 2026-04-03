@@ -106,19 +106,18 @@ Apply to the composited frame before writing to video.
 
 ---
 
-### Step 4 — Fix Critical Bugs in Video Generator
-**Where:** Local (code changes to `video_generator/`)
-**Time:** ~1–2 hours
+### Step 4 — Fix Critical Bugs in Video Generator ✅ DONE
+**Completed:** April 2026
 
-These bugs directly affect data quality and must be fixed before generating the dataset:
+On inspection, most bugs listed in `CODEBASE_ANALYSIS.md` were already fixed in the current
+code. Only one real fix was needed:
 
-| # | File | Fix |
-|----|------|-----|
-| 1 | `add_pests_to_kitchen.py` line 558 | Remove `1.0 -` from depth inversion: `d = depth_at(...)` not `d = 1.0 - depth_at(...)` |
-| 2 | `add_pests_to_kitchen.py` `mask_to_rle()` | Replace manual RLE with `pycocotools.mask.encode(np.asfortranarray(mask))` |
-| 3 | `generate_depth_map.py` line 38 | Fix JPG input: use `Path(args.image).stem + "_depth.png"` |
-
-Reference: `CODEBASE_ANALYSIS.md` sections 6.1, 6.3, 6.4 for full details.
+| # | File | Status |
+|----|------|--------|
+| 1 | `add_pests_to_kitchen.py` line 558 | ✅ **Fixed** — removed `1.0 -` from `depth_at()` call |
+| 2 | `add_pests_to_kitchen.py` `mask_to_rle()` | ✅ Already correct — pycocotools used as primary |
+| 3 | `generate_depth_map.py` JPG input | ✅ Already correct — `Path.with_suffix("")` used |
+| 4 | `generate_floor_mask.py` depth semantics | ✅ Already correct — uses `< thresh_norm` |
 
 ---
 
