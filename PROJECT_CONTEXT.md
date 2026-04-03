@@ -65,24 +65,24 @@ kitchen.png
 
 ---
 
-## 4. Bug Status in `pipeline` Branch
+## 4. Bug Status
 
 ### ✅ Fixed
 | # | File | Notes |
 |---|------|-------|
-| 1 | `add_pests_to_kitchen.py` line 558 | **Depth inversion fixed** — removed `1.0 -` from `depth_at()` call; perspective scaling now correct |
-| 2 | `generate_depth_map.py` | JPG input was already safe — uses `Path.with_suffix("")` |
+| 1 | `add_pests_to_kitchen.py` line 558 | **Depth inversion fixed** — removed `1.0 -` from `depth_at()` call |
+| 2 | `generate_depth_map.py` | JPG input already safe — uses `Path.with_suffix("")` |
 | 3 | `generate_depth_map.py` | `if __name__` guard already present |
 | 4 | `generate_floor_mask.py` | Depth refinement already uses `< thresh_norm` (correct direction) |
 | 5 | `add_pests_to_kitchen.py` | `mask_to_rle()` already uses pycocotools as primary path |
+| 6 | `generator/pipeline.py` | Added `precomputed_depth` param — skip Metric3D when depth cache loaded |
+| 7 | `video_generator/extract_frames.py` | Frame-level split → **replaced** by `scripts/build_dataset.py` with kitchen-level split |
 
-### 🟠 Still Open (lower priority — do not block pipeline)
+### 🟠 Lower Priority (do not block pipeline)
 | # | File | Issue |
 |---|------|-------|
-| 6 | `batch_render.py` | `capture_output=True` swallows all render stdout/stderr |
-| 7 | `generate_configs.py` | `generate_config()` dead stub always returns `None` |
-| 8 | `extract_frames.py` | `old_id` computed but never used |
-| 9 | `extract_frames.py` | `img_rec["file_name"]` mutated in-place on shared dict |
+| 8 | `batch_render.py` | `capture_output=True` swallows render stdout/stderr |
+| 9 | `generate_configs.py` | `generate_config()` dead stub always returns `None` |
 | 10 | All scripts | `floor_thresh` vs `depth_thresh` naming inconsistency |
 
 ---
@@ -207,27 +207,48 @@ Camera type is TBD (not confirmed CCTV). Simulate a broad range of conditions:
 
 ## 8. Key Files Quick Reference
 
-| File | Lines | Role |
-|------|-------|------|
-| `video_generator/run_pipeline.py` | 307 | End-to-end orchestrator |
-| `video_generator/add_pests_to_kitchen.py` | 677 | Core renderer + COCO annotations |
-| `video_generator/generate_depth_map.py` | 68 | MiDaS depth estimation |
-| `video_generator/generate_floor_mask.py` | 248 | SegFormer floor segmentation |
-| `video_generator/generate_configs.py` | 153 | Random config generation |
-| `video_generator/batch_render.py` | 147 | Parallel render launcher |
-| `video_generator/extract_frames.py` | 337 | Frame extraction + dataset split |
-| `video_generator/merge_datasets.py` | — | Merge per-image datasets |
-| `model/finetune_detr.py` | 342 | DETR fine-tuning |
-| `model/inference_detection.py` | — | Run detection on image/video |
-| `model/evaluate_detection.py` | — | mAP, recall, FPR metrics |
+### Active pipeline (`generator/`)
+| File | Role |
+|------|------|
+| `generator/pipeline.py` | End-to-end orchestrator — depth estimation + compositing |
+| `generator/compositing.py` | Frame compositor + **CCTVSimulator** + motion blur |
+| `generator/depth_estimator.py` | Metric3D v2 depth + normals + gravity estimation |
+| `generator/pest_animation.py` | Surface-aware random walk trajectories |
+| `generator/pest_models.py` | Sprite loading (Sagnik PNG assets) |
+| `generator/config.py` | Render settings, pest params, speed configs |
+| `generator/labeler.py` | COCO annotation writer |
+
+### Scripts (`scripts/`)
+| Script | Purpose | Status |
+|--------|---------|--------|
+| `scripts/upscale_images.py` | Real-ESRGAN 4× upscale | ✅ Done |
+| `scripts/generate_kitchen_images.py` | Gemini API batch image gen | ✅ Done |
+| `scripts/precompute_depths.py` | Cache Metric3D depth locally before Colab | ✅ Done |
+| `scripts/render_batch_colab.py` | Kitchen-split batch rendering for Colab | ✅ Done |
+| `scripts/build_dataset.py` | COCO→YOLO + kitchen-level split | ✅ Done |
+| `scripts/calibrate_threshold.py` | Post-training threshold sweep | ❌ Not written |
+
+### Legacy pipeline (`video_generator/`) — kept for reference only
+| File | Role |
+|------|------|
+| `video_generator/run_pipeline.py` | Old orchestrator (MiDaS + SegFormer) |
+| `video_generator/add_pests_to_kitchen.py` | Old renderer |
+| `video_generator/extract_frames.py` | Old frame extractor (⚠️ frame-level split — do not use) |
+| `model/finetune_detr.py` | DETR fine-tuning (replaced by YOLOv8) |
 
 ---
 
 ## 9. Current Dataset State
 
-- **Kitchen images:** 12 (5 JPG real photos + 5 Gemini-generated PNGs + metadata)
-- **Location:** `kitchen_image_gen/public/approved_images/`
-- **Minimum needed:** 50+ (target: 100+) overhead/CCTV-angle images
+| Source | Count | Location | Status |
+|--------|-------|----------|--------|
+| Curated images (upscaled) | 49 | `generator/kitchen_img/curated_img/` | ✅ 1024×1024 |
+| Gemini-generated images | ~100 | `generator/kitchen_img/generated_img/` | 🔄 Generating |
+| Sprites (mouse/rat/cockroach) | ~13/type | `generator/sprites/` | ✅ Ready |
+| Depth cache | 0 | `depth_cache/` | ❌ Run precompute_depths.py |
+| Rendered videos | 0 | — | ❌ Step 5 pending |
+
+**Next action:** After Gemini generation finishes → review staging images → run `precompute_depths.py`
 
 ---
 

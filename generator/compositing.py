@@ -5,16 +5,169 @@ using the random-walk trajectory from pest_animation.compute_walk() and sprites
 from pest_models.load_sprite(). Writes frame PNGs and a COCO annotations.json.
 """
 
+import io
 import math
 import os
+import random
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 
 from generator.pest_animation import compute_walk
 from generator.pest_models import load_sprite
 from generator.labeler import save_coco_dataset
 from generator.config import RENDER_WIDTH, RENDER_HEIGHT, PLANE_WIDTH, PLANE_HEIGHT
+
+
+# ── CCTV simulation ────────────────────────────────────────────────────────────
+
+class CCTVSimulator:
+    """Simulates security-camera degradations on synthetic video frames.
+
+    Parameters are sampled **once per video** so that every frame in the same
+    clip has consistent noise level, brightness, color mode, etc.  This matches
+    real CCTV behaviour where a single recording clip has uniform camera settings.
+
+    Motion blur is handled separately per-frame in composite_frames() because
+    its strength depends on each pest's instantaneous pixel velocity.
+
+    Usage::
+
+        sim = CCTVSimulator()          # sample once at video start
+        frame_rgb = sim.apply(frame_rgb)  # call for every frame
+    """
+
+    def __init__(self):
+        # Gaussian sensor noise — every video gets some noise
+        self.noise_sigma: float = random.uniform(5.0, 20.0)
+
+        # JPEG compression blocking artefacts — every video
+        self.jpeg_quality: int = random.randint(60, 80)
+
+        # Random brightness (exposure variation between cameras)
+        self.brightness: float = random.uniform(0.7, 1.3)
+
+        # IR / grayscale night-vision mode — 30 % of videos
+        self.grayscale: bool = random.random() < 0.30
+
+        # Low-resolution capture then upscale — 20 % of videos
+        self.downscale: bool = random.random() < 0.20
+
+    # ------------------------------------------------------------------
+    def apply(self, img: Image.Image) -> Image.Image:
+        """Apply all consistent CCTV effects to one frame (RGB PIL image)."""
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+
+        # 1. IR / grayscale mode
+        if self.grayscale:
+            img = ImageOps.grayscale(img).convert("RGB")
+
+        # 2. Brightness / exposure
+        img = ImageEnhance.Brightness(img).enhance(self.brightness)
+
+        # 3. Gaussian sensor noise
+        arr = np.asarray(img, dtype=np.float32)
+        noise = np.random.normal(0.0, self.noise_sigma, arr.shape).astype(np.float32)
+        arr = np.clip(arr + noise, 0.0, 255.0).astype(np.uint8)
+        img = Image.fromarray(arr)
+
+        # 4. Resolution halve → upsample (simulates low-res capture)
+        if self.downscale:
+            w, h = img.size
+            half = img.resize((max(1, w // 2), max(1, h // 2)), Image.LANCZOS)
+            img = half.resize((w, h), Image.LANCZOS)
+
+        # 5. JPEG compression artefacts (encode + decode in memory)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=self.jpeg_quality)
+        buf.seek(0)
+        img = Image.open(buf).copy()
+
+        return img
+
+    def __repr__(self) -> str:
+        return (
+            f"CCTVSimulator(noise_sigma={self.noise_sigma:.1f}, "
+            f"jpeg_quality={self.jpeg_quality}, "
+            f"brightness={self.brightness:.2f}, "
+            f"grayscale={self.grayscale}, "
+            f"downscale={self.downscale})"
+        )
+
+
+# ── Motion blur helpers ────────────────────────────────────────────────────────
+
+def _motion_blur_kernel(dx: float, dy: float, max_kernel: int = 15) -> np.ndarray | None:
+    """Build a directional motion-blur convolution kernel.
+
+    Args:
+        dx, dy:     Pixel displacement vector for this frame.
+        max_kernel: Maximum kernel side length (odd).
+
+    Returns:
+        A (k, k) float32 normalised kernel, or None if displacement is too small.
+    """
+    length = int(np.clip(np.hypot(dx, dy) * 1.5, 0, max_kernel))
+    if length < 3:
+        return None
+    if length % 2 == 0:
+        length += 1
+
+    k = np.zeros((length, length), dtype=np.float32)
+    cx = cy = length // 2
+    angle = math.atan2(dy, dx)
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+
+    for i in range(length):
+        t = (i - cx) / max(cx, 1)
+        xi = int(round(cx + t * cos_a * cx))
+        yi = int(round(cy + t * sin_a * cy))
+        if 0 <= xi < length and 0 <= yi < length:
+            k[yi, xi] = 1.0
+
+    total = k.sum()
+    if total < 1e-6:
+        return None
+    return k / total
+
+
+def apply_motion_blur_to_sprite(
+    sprite: Image.Image,
+    dx_px: float,
+    dy_px: float,
+) -> Image.Image:
+    """Apply directional motion blur to an RGBA sprite.
+
+    RGB channels are blurred along the velocity vector; alpha is blurred
+    with the same kernel to give a natural motion-ghost transparency fall-off.
+
+    Args:
+        sprite:  RGBA PIL image of the pest sprite.
+        dx_px:   Horizontal pixel displacement this frame.
+        dy_px:   Vertical pixel displacement this frame.
+
+    Returns:
+        Motion-blurred RGBA PIL image (same size as input).
+    """
+    kernel = _motion_blur_kernel(dx_px, dy_px)
+    if kernel is None:
+        return sprite
+
+    try:
+        from scipy.ndimage import convolve  # type: ignore
+    except ImportError:
+        return sprite  # skip gracefully if scipy unavailable
+
+    if sprite.mode != "RGBA":
+        sprite = sprite.convert("RGBA")
+
+    arr = np.asarray(sprite, dtype=np.float32)  # (H, W, 4)
+    out = np.empty_like(arr)
+    for ch in range(4):
+        out[..., ch] = np.clip(convolve(arr[..., ch], kernel, mode="constant"), 0, 255)
+
+    return Image.fromarray(out.astype(np.uint8), mode="RGBA")
 
 
 _CATEGORY_MAP = {"mouse": 1, "rat": 2, "cockroach": 3}
@@ -44,6 +197,7 @@ def composite_frames(
     frame_format="png",
     save_every_n=1,
     keep_full_annotations=False,
+    cctv_sim=None,
 ):
     """Render all frames by compositing pest sprites onto the background image.
 
@@ -89,6 +243,10 @@ def composite_frames(
         keep_full_annotations: If True, write COCO image/annotation entries for
             all simulated frames even when only a sparse subset of frame images
             is persisted on disk.
+        cctv_sim: Optional CCTVSimulator instance. When provided, each saved
+            frame is passed through it (noise, compression, brightness, etc.)
+            before writing to disk. Motion blur is also applied to each sprite
+            proportional to its pixel velocity. Pass None to skip simulation.
     """
     os.makedirs(frames_dir, exist_ok=True)
     os.makedirs(labels_dir, exist_ok=True)
@@ -264,6 +422,16 @@ def composite_frames(
             )
             rotated = _sharpen_rgba(rotated)
 
+            # Motion blur proportional to pixel velocity (CCTV simulation).
+            if cctv_sim is not None and frame_idx + 1 < num_frames:
+                nx, ny, _, _ = walk[frame_idx + 1]
+                ncx, ncy = _world_to_pixel(
+                    nx, ny, render_width, render_height, plane_width, plane_height
+                )
+                dx_px = float(ncx - paste_cx)
+                dy_px = float(ncy - paste_cy)
+                rotated = apply_motion_blur_to_sprite(rotated, dx_px, dy_px)
+
             paste_x = paste_cx - rotated.width  // 2
             paste_y = paste_cy - rotated.height // 2
 
@@ -293,7 +461,10 @@ def composite_frames(
 
         if persist_frame:
             frame_path = os.path.join(frames_dir, f"frame_{frame_num:04d}.{frame_ext}")
-            _save_frame_image(frame_img.convert("RGB"), frame_path, frame_ext)
+            out_rgb = frame_img.convert("RGB")
+            if cctv_sim is not None:
+                out_rgb = cctv_sim.apply(out_rgb)
+            _save_frame_image(out_rgb, frame_path, frame_ext)
 
         if persist_frame and save_mask_previews:
             # --- Per-pest dynamic "pest vision" mask preview ---

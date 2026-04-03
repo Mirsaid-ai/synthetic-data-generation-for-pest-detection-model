@@ -33,7 +33,7 @@ from generator.config import (
 )
 from concurrent.futures import ThreadPoolExecutor
 
-from generator.compositing import composite_frames
+from generator.compositing import CCTVSimulator, composite_frames
 
 from generator.depth_estimator import (
     build_movement_mask,
@@ -122,6 +122,7 @@ def generate_video(
     keep_only_frame_outputs=False,
     save_every_n=1,
     keep_full_annotations=False,
+    precomputed_depth=None,
 ):
     """Run the full generation pipeline for one kitchen image.
 
@@ -146,6 +147,17 @@ def generate_video(
             original timeline.
         keep_full_annotations: If True, keep COCO entries for all simulated
             frames even when only a sparse subset of frame images is saved.
+        precomputed_depth: Optional dict with pre-computed scene analysis results,
+            allowing Metric3D + gravity estimation to be skipped entirely (critical
+            for CPU-only Colab rendering where ML inference is very slow).
+            Expected keys:
+                "depth"    – (H, W) float32 numpy array (metres)
+                "normals"  – (H, W, 3) float32 numpy array
+                "fx"       – float, focal length in pixels
+                "gravity"  – dict returned by estimate_gravity() with at least
+                             'gravity_cam' (3-vector) and 'confidence' (float)
+            Produced by scripts/precompute_depths.py and loadable via
+            numpy.load(path, allow_pickle=True).
 
     Returns:
         Dict with video_id/job_id, video_path, frames_dir, labels_dir,
@@ -209,26 +221,35 @@ def generate_video(
     pest_counts = Counter(cfg["type"] for cfg in pest_configs)
     pest_generation_metadata = []
 
-    # Depth-aware placement — Metric3D v2 yields depth + normals in one pass.
-    # Gravity estimation (classical VP) is independent and can run in parallel.
-    # Strategy: parallel on CPU or multi-GPU, sequential on single GPU.
-    strategy = compute_inference_strategy()
-    print(f"Inference strategy: {strategy}")
-
-    if strategy == "parallel":
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            f_metric3d = ex.submit(estimate_metric3d, image_path)
-            f_gravity  = ex.submit(estimate_gravity, image_path)
-        metric3d_result = f_metric3d.result()
-        gravity_result  = f_gravity.result()
+    # Depth-aware placement — use pre-computed cache when available (speeds up
+    # Colab CPU batch rendering by skipping Metric3D + gravity inference entirely).
+    if precomputed_depth is not None:
+        depth_map         = np.asarray(precomputed_depth["depth"],   dtype=np.float32)
+        predicted_normals = np.asarray(precomputed_depth["normals"], dtype=np.float32)
+        focal_length_px   = float(precomputed_depth["fx"])
+        gravity_result    = precomputed_depth["gravity"]
+        img_h, img_w      = depth_map.shape
+        print(f"Using pre-computed depth cache for {os.path.basename(image_path)}")
     else:
-        metric3d_result = estimate_metric3d(image_path)
-        gravity_result  = estimate_gravity(image_path)
+        # Metric3D v2 yields depth + normals in one pass.
+        # Gravity estimation (classical VP) is independent and can run in parallel.
+        strategy = compute_inference_strategy()
+        print(f"Inference strategy: {strategy}")
 
-    depth_map         = metric3d_result["depth"]
-    predicted_normals = metric3d_result["normals"]
-    focal_length_px   = metric3d_result["fx"]
-    img_h, img_w      = depth_map.shape
+        if strategy == "parallel":
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                f_metric3d = ex.submit(estimate_metric3d, image_path)
+                f_gravity  = ex.submit(estimate_gravity, image_path)
+            metric3d_result = f_metric3d.result()
+            gravity_result  = f_gravity.result()
+        else:
+            metric3d_result = estimate_metric3d(image_path)
+            gravity_result  = estimate_gravity(image_path)
+
+        depth_map         = metric3d_result["depth"]
+        predicted_normals = metric3d_result["normals"]
+        focal_length_px   = metric3d_result["fx"]
+        img_h, img_w      = depth_map.shape
 
     if save_scene_previews:
         save_depth_preview(depth_map, os.path.join(frames_dir, "depth_preview.jpg"))
@@ -359,6 +380,10 @@ def generate_video(
             },
         })
 
+    # Sample CCTV simulation parameters once for this entire video clip.
+    cctv_sim = CCTVSimulator()
+    print(f"CCTV simulation: {cctv_sim}")
+
     dense_mp4_with_sparse_persist = assemble_video and effective_save_every_n > 1
 
     if dense_mp4_with_sparse_persist:
@@ -386,6 +411,7 @@ def generate_video(
                 frame_format=frame_ext,
                 save_every_n=1,
                 keep_full_annotations=True,
+                cctv_sim=cctv_sim,
             )
             print(f"Dense compositing finished in {_time.monotonic() - _t0:.1f}s (job {job_id})")
             _assemble_video(temp_frames_dir, video_path, fps=effective_fps, frame_ext=frame_ext)
@@ -417,6 +443,7 @@ def generate_video(
             frame_format=frame_ext,
             save_every_n=effective_save_every_n,
             keep_full_annotations=bool(keep_full_annotations),
+            cctv_sim=cctv_sim,
         )
         print(f"Compositing finished in {_time.monotonic() - _t0:.1f}s (job {job_id})")
 
