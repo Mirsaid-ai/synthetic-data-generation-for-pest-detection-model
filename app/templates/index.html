@@ -11,10 +11,13 @@
         <h1>Synthetic Pest Video Generator</h1>
 
         <div class="tabs">
+            {% if not cloud_mode %}
             <a class="tab {% if active_tab == 'generate' %}active{% endif %}" href="{{ url_for('index') }}">Test Video Generator</a>
             <a class="tab {% if active_tab == 'real_generator' %}active{% endif %}" href="{{ url_for('real_generator') }}">Real Video Generator</a>
             <a class="tab {% if active_tab == 'curator' %}active{% endif %}" href="{{ url_for('curator') }}">Kitchen Curator</a>
+            {% endif %}
             <a class="tab {% if active_tab == 'kitchen_generator' %}active{% endif %}" href="{{ url_for('kitchen_generator') }}">Kitchen Generator</a>
+            <a class="tab {% if active_tab == 'inference' %}active{% endif %}" href="{{ url_for('inference') }}">Model Inference</a>
         </div>
 
         {% with messages = get_flashed_messages() %}
@@ -469,6 +472,13 @@
         {% elif active_tab == 'kitchen_generator' %}
         <p class="subtitle">Generate photorealistic kitchen images using Google Gemini. Kept images are saved to <code>curated_img/</code>.</p>
 
+        {% if kgen_saved_name and not cloud_mode %}
+        <div class="kgen-handoff">
+            <span>&#x2713; Saved <code>{{ kgen_saved_name }}</code>. Ready to render a synthetic video from it?</span>
+            <a class="btn btn-success" href="{{ url_for('index', filename=kgen_saved_name) }}">Use in Test Video Generator &rarr;</a>
+        </div>
+        {% endif %}
+
         {# --- API Key status widget --- #}
         <div class="apikey-widget">
             {% if gemini_key.set %}
@@ -600,6 +610,317 @@
         </script>
 
         {# ================================================================== #}
+        {# MODEL INFERENCE TAB                                                #}
+        {# ================================================================== #}
+        {% elif active_tab == 'inference' %}
+        <p class="subtitle">Run the trained pest detector on a generated video or an uploaded one. Detections are overlaid live on playback.</p>
+
+        <div class="inference-panel">
+            <div class="inference-model-widget">
+                {% if inference_model_info %}
+                <div class="apikey-status apikey-ok">
+                    <span>
+                        &#x2713; Model loaded: <code>{{ inference_model_info.model_path }}</code>
+                        &nbsp;·&nbsp; classes: <code>{{ inference_model_info.class_names|join(', ') }}</code>
+                        &nbsp;·&nbsp; device: <code>{{ inference_model_info.device }}</code>
+                    </span>
+                    <button class="btn-link" onclick="document.getElementById('inf-model-form').style.display=document.getElementById('inf-model-form').style.display==='none'?'flex':'none'">Change</button>
+                </div>
+                {% else %}
+                <div class="apikey-status apikey-missing">
+                    <span>&#x26A0; No model loaded. Set a checkpoint path or upload a <code>.pt</code> file.
+                        {% if inference_model_error %}<br><small>{{ inference_model_error }}</small>{% endif %}
+                    </span>
+                    <button class="btn-link" onclick="document.getElementById('inf-model-form').style.display='flex'">Load model</button>
+                </div>
+                {% endif %}
+                <form
+                    id="inf-model-form"
+                    action="{{ url_for('inference_set_model') }}"
+                    method="post"
+                    enctype="multipart/form-data"
+                    class="apikey-form"
+                    style="display:{% if inference_model_info %}none{% else %}flex{% endif %}; flex-wrap:wrap; gap:0.5rem;"
+                >
+                    <input
+                        type="text"
+                        name="model_path"
+                        class="apikey-input"
+                        placeholder="/path/to/best.pt   (or upload below)"
+                        value="{{ inference_model_path or '' }}"
+                        style="flex:2 1 280px;"
+                    >
+                    <label class="file-label" style="flex:1 1 220px;">
+                        Upload .pt
+                        <input type="file" name="checkpoint_file" accept=".pt">
+                    </label>
+                    <button type="submit" class="btn">Load</button>
+                </form>
+            </div>
+        </div>
+
+        <div class="inference-panel">
+            <h3 style="margin-top:0;">Run Detection</h3>
+            <form
+                action="{{ url_for('inference_run') }}"
+                method="post"
+                enctype="multipart/form-data"
+                class="realgen-form"
+                id="inf-run-form"
+            >
+                <div class="realgen-row">
+                    <label class="realgen-field">
+                        <span>Confidence threshold</span>
+                        <input type="number" step="0.05" min="0.0" max="1.0" name="threshold"
+                               value="{{ inference_form_defaults.threshold }}" required>
+                    </label>
+                    <label class="realgen-field">
+                        <span>NMS IoU</span>
+                        <input type="number" step="0.05" min="0.0" max="1.0" name="iou"
+                               value="{{ inference_form_defaults.iou }}" required>
+                    </label>
+                    <label class="realgen-field">
+                        <span>Every N-th frame</span>
+                        <input type="number" min="1" name="every_n"
+                               value="{{ inference_form_defaults.every_n }}" required>
+                    </label>
+                    <label class="realgen-field">
+                        <span>Max frames (0 = all)</span>
+                        <input type="number" min="0" name="max_frames"
+                               value="{{ inference_form_defaults.max_frames }}" required>
+                    </label>
+                </div>
+
+                <div class="inf-video-picker">
+                    <p style="margin:0.6rem 0 0.3rem 0;"><strong>Video source</strong></p>
+
+                    <label class="realgen-field" style="margin-bottom:0.5rem;">
+                        <span>Pick a generated video</span>
+                        <select name="video_id">
+                            <option value="">— none, use upload below —</option>
+                            {% for v in inference_video_choices %}
+                            <option value="{{ v.video_id }}"
+                                {% if inference_preselect_video_id == v.video_id %}selected{% endif %}>
+                                {{ v.video_id }}
+                                {% if v.split %} [{{ v.split }}]{% endif %}
+                                {% if v.kitchen_id %} — {{ v.kitchen_id }}{% endif %}
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </label>
+
+                    <label class="file-label" style="display:inline-flex;">
+                        Or upload a video
+                        <input type="file" name="video_file" accept="video/*">
+                    </label>
+
+                    <label class="realgen-checkbox" style="margin-top:0.6rem;">
+                        <input type="checkbox" name="use_gt" value="1" checked>
+                        <span>Use ground-truth labels if available (auto-detected for synthetic videos) — shows TDR / FPR</span>
+                    </label>
+                </div>
+
+                <button type="submit" class="btn" style="margin-top:0.6rem;"
+                        {% if not inference_model_info %}disabled{% endif %}>
+                    &#x25B6; Run Inference
+                </button>
+                {% if not inference_model_info %}
+                <p class="curated-meta" style="margin-top:0.4rem;">Load a model first to enable the Run button.</p>
+                {% endif %}
+            </form>
+        </div>
+
+        {% if inference_current_job %}
+        <hr>
+        <h2>Inference Results</h2>
+        <div
+            id="inf-progress-panel"
+            class="realgen-progress-panel"
+            data-status-url="{{ url_for('inference_status', job_id=inference_current_job.job_id) }}"
+        >
+            <p id="inf-progress-text" class="realgen-progress-text">Initializing inference...</p>
+            <div class="realgen-progress-track">
+                <div id="inf-progress-fill" class="realgen-progress-fill"
+                     style="width: {{ inference_current_job.progress_pct|default(0) }}%;"></div>
+            </div>
+        </div>
+
+        <div id="inf-error" class="flash" style="display:none;">
+            <p id="inf-error-text"></p>
+        </div>
+
+        <div id="inf-summary-card" class="inf-summary-card" style="display:none;">
+            <div class="inf-summary-grid">
+                <div><small>Frames processed</small><br><strong id="inf-frames-total">—</strong></div>
+                <div><small>Frames with detection</small><br><strong id="inf-frames-det">—</strong></div>
+                <div><small>Total detections</small><br><strong id="inf-total-dets">—</strong></div>
+                <div><small>Avg confidence</small><br><strong id="inf-avg-score">—</strong></div>
+                <div><small>Wall time</small><br><strong id="inf-wall">—</strong></div>
+                <div><small>Per-class</small><br><strong id="inf-per-class">—</strong></div>
+            </div>
+            <div id="inf-metrics-row" class="inf-metrics-row" style="display:none;">
+                <div class="inf-metric"><small>True detection rate (frame)</small><br><strong id="inf-tdr">—</strong></div>
+                <div class="inf-metric"><small>False-positive rate (frame)</small><br><strong id="inf-fpr">—</strong></div>
+                <div class="inf-metric"><small>Detection precision</small><br><strong id="inf-prec">—</strong></div>
+                <div id="inf-pass-badge" class="inf-pass-badge">—</div>
+            </div>
+            <p id="inf-artifact-links" class="curated-meta" style="margin-top:0.6rem;"></p>
+        </div>
+
+        <div id="inf-video-wrap" class="video-section" style="display:none;">
+            <h3>Annotated Video</h3>
+            <video id="inf-player" width="720" controls autoplay loop muted style="max-width:100%;">
+                <source id="inf-player-src" src="" type="video/mp4">
+            </video>
+        </div>
+
+        <script>
+        (function() {
+            const panel = document.getElementById("inf-progress-panel");
+            if (!panel) return;
+            const statusUrl = panel.dataset.statusUrl;
+
+            const textEl = document.getElementById("inf-progress-text");
+            const fillEl = document.getElementById("inf-progress-fill");
+            const errorBox = document.getElementById("inf-error");
+            const errorText = document.getElementById("inf-error-text");
+            const summaryCard = document.getElementById("inf-summary-card");
+            const metricsRow = document.getElementById("inf-metrics-row");
+            const videoWrap = document.getElementById("inf-video-wrap");
+            const videoSrc = document.getElementById("inf-player-src");
+            const videoEl = document.getElementById("inf-player");
+            const artifactLinks = document.getElementById("inf-artifact-links");
+
+            function fmt(n, digits) {
+                if (n == null || isNaN(n)) return "—";
+                return Number(n).toFixed(digits == null ? 2 : digits);
+            }
+
+            function applyState(s) {
+                const pct = Math.max(0, Math.min(100, s.progress_pct || 0));
+                fillEl.style.width = pct + "%";
+
+                if (s.done) {
+                    textEl.textContent = `Done: processed ${s.progress_frames}/${s.total_frames} frames (${pct}%) in ${s.wall_seconds}s.`;
+                } else {
+                    textEl.textContent = `Running: ${s.progress_frames}/${s.total_frames} frames (${pct}%).`;
+                }
+
+                if (s.error) {
+                    errorBox.style.display = "block";
+                    errorText.textContent = s.error;
+                } else {
+                    errorBox.style.display = "none";
+                }
+
+                summaryCard.style.display = "block";
+                document.getElementById("inf-frames-total").textContent = s.total_frames ?? "—";
+                document.getElementById("inf-frames-det").textContent = s.frames_with_detection ?? "—";
+                document.getElementById("inf-total-dets").textContent = s.total_detections ?? "—";
+                document.getElementById("inf-avg-score").textContent = fmt(s.avg_score, 3);
+                document.getElementById("inf-wall").textContent = (s.wall_seconds != null) ? (s.wall_seconds + "s") : "—";
+                const pc = s.per_class_counts || {};
+                const pcPairs = Object.keys(pc).sort().map(k => `${k}=${pc[k]}`);
+                document.getElementById("inf-per-class").textContent = pcPairs.length ? pcPairs.join(", ") : "none";
+
+                if (s.metrics) {
+                    metricsRow.style.display = "flex";
+                    const m = s.metrics;
+                    document.getElementById("inf-tdr").textContent = (m.true_detection_rate_frame != null) ? (fmt(100 * m.true_detection_rate_frame, 1) + "%") : "n/a";
+                    document.getElementById("inf-fpr").textContent = (m.false_positive_rate_frame != null) ? (fmt(100 * m.false_positive_rate_frame, 1) + "%") : "n/a";
+                    document.getElementById("inf-prec").textContent = (m.detection_precision != null) ? (fmt(100 * m.detection_precision, 1) + "%") : "n/a";
+                    const badge = document.getElementById("inf-pass-badge");
+                    if (m.passes_target) {
+                        badge.textContent = "PASSES A+ target (TDR \u2265 80%, FPR < 5%)";
+                        badge.className = "inf-pass-badge inf-pass-ok";
+                    } else if (m.true_detection_rate_frame != null && m.false_positive_rate_frame != null) {
+                        badge.textContent = "Does not meet A+ target";
+                        badge.className = "inf-pass-badge inf-pass-fail";
+                    } else {
+                        badge.textContent = "Insufficient GT to judge";
+                        badge.className = "inf-pass-badge";
+                    }
+                }
+
+                if (s.done && s.annotated_video_url) {
+                    if (videoSrc.src !== location.origin + s.annotated_video_url) {
+                        videoSrc.src = s.annotated_video_url;
+                        videoEl.load();
+                    }
+                    videoWrap.style.display = "block";
+                }
+
+                if (s.done) {
+                    const links = [];
+                    if (s.annotated_video_url) links.push(`<a href="${s.annotated_video_url}" download>Download annotated MP4</a>`);
+                    if (s.predictions_url) links.push(`<a href="${s.predictions_url}" download>Download predictions.json</a>`);
+                    artifactLinks.innerHTML = links.join(" &nbsp;·&nbsp; ");
+                }
+            }
+
+            async function poll() {
+                try {
+                    const r = await fetch(statusUrl, {cache:"no-store"});
+                    if (r.ok) {
+                        const data = await r.json();
+                        if (data && !data.error_404) applyState(data);
+                        if (data.done) return;
+                    }
+                } catch (e) { /* keep retrying */ }
+                setTimeout(poll, 1500);
+            }
+            // Initial paint from server-rendered job
+            const initial = {{ inference_current_job|tojson }};
+            applyState(initial);
+            if (!initial.done) poll();
+        })();
+        </script>
+        {% endif %}
+
+        {% if inference_recent_jobs %}
+        <hr>
+        <h3>Recent Inference Jobs</h3>
+        <div class="realgen-results-table-wrap">
+            <table class="realgen-results-table">
+                <thead>
+                    <tr>
+                        <th>job_id</th>
+                        <th>status</th>
+                        <th>frames</th>
+                        <th>detections</th>
+                        <th>TDR</th>
+                        <th>FPR</th>
+                        <th>wall (s)</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for j in inference_recent_jobs %}
+                    <tr>
+                        <td><code>{{ j.job_id }}</code></td>
+                        <td>{% if j.done %}done{% else %}running{% endif %}</td>
+                        <td>{{ j.progress_frames }}/{{ j.total_frames }}</td>
+                        <td>{{ j.total_detections }}</td>
+                        <td>
+                            {% if j.metrics and j.metrics.true_detection_rate_frame is not none %}
+                            {{ (100 * j.metrics.true_detection_rate_frame) | round(1) }}%
+                            {% else %}—{% endif %}
+                        </td>
+                        <td>
+                            {% if j.metrics and j.metrics.false_positive_rate_frame is not none %}
+                            {{ (100 * j.metrics.false_positive_rate_frame) | round(1) }}%
+                            {% else %}—{% endif %}
+                        </td>
+                        <td>{{ j.wall_seconds or '—' }}</td>
+                        <td><a class="btn btn-muted" href="{{ url_for('inference', job_id=j.job_id) }}">Open</a></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+
+        {# ================================================================== #}
         {# GENERATOR TAB (Pest Video Generation)                              #}
         {# ================================================================== #}
         {% else %}
@@ -642,7 +963,8 @@
             </p>
             <div class="curated-grid">
                 {% for image_name in curated_page_images %}
-                <div class="curated-card">
+                <div class="curated-card {% if highlight_filename == image_name %}curated-card-highlight{% endif %}"
+                     id="curated-{{ image_name }}">
                     <div class="curated-card-frame">
                         <img
                             src="{{ url_for('serve_curated_image', filename=image_name) }}"
@@ -696,6 +1018,14 @@
         <img id="preview" class="preview-img" style="display:none;" alt="preview">
 
         <script>
+            {% if highlight_filename %}
+            (function() {
+                const target = document.getElementById("curated-{{ highlight_filename }}");
+                if (target) {
+                    target.scrollIntoView({ behavior: "smooth", block: "center" });
+                }
+            })();
+            {% endif %}
             (function() {
                 const lengthInput = document.getElementById("test-length-seconds");
                 const fpsInput = document.getElementById("test-fps");
@@ -752,12 +1082,15 @@
         <p style="color:#555;">Total render time: <strong>{{ render_time }}s</strong></p>
         {% endif %}
 
-        <form action="{{ url_for('regenerate', job_id=job_id) }}" method="post" style="margin-bottom:16px;">
-            <input type="hidden" name="page" value="{{ curated_page|default(1) }}">
-            <input type="hidden" name="length_seconds" value="{{ test_form_values.length_seconds if test_form_values else 24 }}">
-            <input type="hidden" name="fps" value="{{ test_form_values.fps if test_form_values else 10 }}">
-            <button type="submit" class="btn">&#x21BA; Regenerate with Same Image</button>
-        </form>
+        <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:16px;">
+            <form action="{{ url_for('regenerate', job_id=job_id) }}" method="post">
+                <input type="hidden" name="page" value="{{ curated_page|default(1) }}">
+                <input type="hidden" name="length_seconds" value="{{ test_form_values.length_seconds if test_form_values else 24 }}">
+                <input type="hidden" name="fps" value="{{ test_form_values.fps if test_form_values else 10 }}">
+                <button type="submit" class="btn">&#x21BA; Regenerate with Same Image</button>
+            </form>
+            <a class="btn btn-secondary" href="{{ url_for('inference', video_job_id=job_id) }}">&#x1F3AF; Run Detection on This Video</a>
+        </div>
 
         {% if video_url %}
         <div class="video-section">

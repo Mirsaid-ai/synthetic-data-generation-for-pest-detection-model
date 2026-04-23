@@ -45,6 +45,17 @@ from generator.kitchen_img.download_kitchens import (
 )
 from generator.pipeline import generate_video
 
+from app.inference_job import (
+    INFERENCE_DIR,
+    list_jobs as list_inference_jobs,
+    get_job as get_inference_job,
+    load_inference_state,
+    save_inference_state,
+    probe_detector,
+    start_inference_job,
+)
+from app.storage import ensure_checkpoint, get_checkpoint_path, storage_status
+
 
 # Test tab roots (can be redirected to temp when TESTING_MODE=True)
 UPLOAD_DIR = DEFAULT_UPLOAD_DIR
@@ -57,8 +68,10 @@ REAL_TRAIN_FRAME_STRIDE = 10
 
 
 # --- Testing mode: use temp directory instead of outputs/ ---
-# Set to False (or remove this block) when you want to save permanently
-TESTING_MODE = True
+# Set to False (or remove this block) when you want to save permanently.
+# Disabled automatically when running as a cloud deployment so artifacts
+# land in /data (or the configured persistent outputs directory).
+TESTING_MODE = os.environ.get("CLOUD_MODE", "").lower() not in {"1", "true", "yes", "on"}
 
 if TESTING_MODE:
     import tempfile
@@ -73,6 +86,15 @@ if TESTING_MODE:
 app = Flask(__name__)
 app.secret_key = "synthetic-pest-gen-dev-key"
 
+# ---------------------------------------------------------------------------
+# Cloud-mode: when CLOUD_MODE=1 we hide the heavy tabs (Test Video Generator,
+# Real Video Generator, Kitchen Curator) because Metric3D/rendering deps are
+# not installed in the HF Space Docker image. The routes still work; they
+# are just not advertised in the tab bar.
+# ---------------------------------------------------------------------------
+CLOUD_MODE = os.environ.get("CLOUD_MODE", "").lower() in {"1", "true", "yes", "on"}
+app.jinja_env.globals["cloud_mode"] = CLOUD_MODE
+
 # Kitchen image directories:
 #   generator/kitchen_img/uncurated_img  (downloaded + generated, pending review)
 #   generator/kitchen_img/curated_img    (approved images)
@@ -81,6 +103,9 @@ CURATED_IMG_DIR = os.path.join(KITCHEN_ROOT_DIR, "curated_img")
 TRAIN_TEST_SPLIT_PATH = os.path.join(KITCHEN_ROOT_DIR, "test_train_split.csv")
 
 # Ensure output directories exist
+INFERENCE_UPLOAD_DIR = os.path.join(PROJECT_OUTPUT_DIR, "inference_uploads")
+DEMO_VIDEOS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "demo_videos")
+
 for d in [
     UPLOAD_DIR,
     FRAMES_DIR,
@@ -88,6 +113,8 @@ for d in [
     LABELS_DIR,
     UNCURATED_IMG_DIR,
     CURATED_IMG_DIR,
+    INFERENCE_DIR,
+    INFERENCE_UPLOAD_DIR,
 ]:
     os.makedirs(d, exist_ok=True)
 
@@ -137,8 +164,38 @@ def _background_warm_models():
         print(f"WARNING: Metric3D model warmup failed: {e}")
 
 
-# Warm the model in the background so the first generation request is faster.
-threading.Thread(target=_background_warm_models, daemon=True).start()
+# Warm the depth/surface models in the background so the first generation
+# request is faster. Skipped in cloud mode: the heavy video-gen tabs are
+# hidden there, so loading Metric3D would just waste memory.
+if not CLOUD_MODE:
+    threading.Thread(target=_background_warm_models, daemon=True).start()
+
+
+def _bootstrap_checkpoint_from_env():
+    """On boot, populate outputs/inference_state.json from MODEL_PATH /
+    CHECKPOINT_URL / HF /data. This makes the /inference tab show "Model
+    loaded" out-of-the-box on a fresh cloud deployment.
+    """
+    try:
+        resolved = ensure_checkpoint()
+        state = load_inference_state()
+        if resolved and os.path.isfile(resolved):
+            # Only overwrite the state if no model has been set manually, OR
+            # if the configured state points at a file that no longer exists.
+            current = state.get("model_path")
+            if not current or not os.path.isfile(current):
+                state["model_path"] = resolved
+                state["bootstrapped_at"] = datetime.now().isoformat(timespec="seconds")
+                save_inference_state(state)
+                print(f"[boot] Inference model bootstrapped from: {resolved}")
+        else:
+            status = storage_status()
+            print(f"[boot] No checkpoint available yet. Storage status: {status}")
+    except Exception as e:
+        print(f"[boot] Checkpoint bootstrap failed (non-fatal): {e}")
+
+
+_bootstrap_checkpoint_from_env()
 
 
 def _allowed_file(filename):
@@ -274,7 +331,20 @@ def _generate_video_for_image_with_params(
 
 
 def _render_generate_page(job_context=None):
-    page = _parse_positive_int(request.args.get("page", 1), default=1)
+    # If ?filename=kitchen_NNNN.ext is provided (hand-off from Kitchen
+    # Generator), automatically navigate to the page containing that image
+    # so the user can click Generate without searching.
+    highlight_filename = (request.args.get("filename") or "").strip()
+    page_override = None
+    if highlight_filename:
+        all_images = list_curated_images()
+        if highlight_filename in all_images:
+            idx = all_images.index(highlight_filename)
+            page_override = (idx // CURATED_PAGE_SIZE) + 1
+        else:
+            highlight_filename = ""
+
+    page = page_override or _parse_positive_int(request.args.get("page", 1), default=1)
     test_length_seconds = _parse_positive_float(request.args.get("length_seconds"), default=24.0)
     test_fps = _parse_positive_int(request.args.get("fps"), default=10)
     curated = _get_curated_page(page)
@@ -292,6 +362,7 @@ def _render_generate_page(job_context=None):
         "curated_has_next": curated["has_next"],
         "curated_prev_page": curated["prev_page"],
         "curated_next_page": curated["next_page"],
+        "highlight_filename": highlight_filename,
     }
     if job_context:
         context.update(job_context)
@@ -716,6 +787,10 @@ _migrate_curated_images_to_kitchen_ids()
 
 @app.route("/", methods=["GET"])
 def index():
+    # In cloud deployments the Test Video Generator is hidden. Redirect the
+    # root URL to the Model Inference tab so the grading demo loads directly.
+    if CLOUD_MODE:
+        return redirect(url_for("inference"))
     return _render_generate_page()
 
 
@@ -1288,11 +1363,19 @@ def _gemini_key_status():
 @app.route("/kitchen-generator", methods=["GET"])
 def kitchen_generator():
     from generator.kitchen_img.generate_kitchen import PROMPT_TEMPLATES
+    saved_name = (request.args.get("saved") or "").strip()
+    # Only trust saved values that match our kitchen filename pattern and exist.
+    if saved_name and (
+        not KITCHEN_NAME_RE.match(saved_name)
+        or not os.path.exists(os.path.join(CURATED_IMG_DIR, saved_name))
+    ):
+        saved_name = ""
     return render_template(
         "index.html",
         active_tab="kitchen_generator",
         prompt_templates=PROMPT_TEMPLATES,
         gemini_key=_gemini_key_status(),
+        kgen_saved_name=saved_name,
     )
 
 
@@ -1394,7 +1477,7 @@ def kitchen_generator_save():
         return redirect(url_for("kitchen_generator"))
 
     flash(f"Image saved to curated_img/{curated_name}")
-    return redirect(url_for("kitchen_generator"))
+    return redirect(url_for("kitchen_generator", saved=curated_name))
 
 
 @app.route("/kitchen-generator/discard", methods=["POST"])
@@ -1409,6 +1492,287 @@ def kitchen_generator_discard():
             pass
     flash("Image discarded.")
     return redirect(url_for("kitchen_generator"))
+
+
+# ---------------------------------------------------------------------------
+# Model Inference tab
+# ---------------------------------------------------------------------------
+
+ALLOWED_VIDEO_EXTENSIONS = {"mp4", "mov", "avi", "mkv", "webm"}
+
+
+def _allowed_video(filename):
+    return (
+        "." in filename
+        and filename.rsplit(".", 1)[1].lower() in ALLOWED_VIDEO_EXTENSIONS
+    )
+
+
+def _list_generated_videos():
+    """Return (job_id, video_path, split) tuples from generated_state.json
+    where the associated MP4 still exists. Used to populate the 'pick from
+    generated videos' dropdown in the inference tab.
+    """
+    state = _load_generated_state()
+    out = []
+    for row in state.get("generated_videos", []):
+        video_path = row.get("video_path") or ""
+        if not video_path:
+            continue
+        if not os.path.isabs(video_path):
+            video_path = os.path.join(PROJECT_OUTPUT_DIR, os.path.relpath(video_path, "outputs"))
+        if os.path.isfile(video_path):
+            out.append({
+                "video_id": row.get("video_id") or row.get("job_id"),
+                "kitchen_id": row.get("kitchen_id"),
+                "split": row.get("split"),
+                "video_path": video_path,
+                "labels_dir": row.get("labels_dir"),
+            })
+    # Also include preview videos from the test generator
+    if os.path.isdir(VIDEOS_DIR):
+        for name in sorted(os.listdir(VIDEOS_DIR)):
+            if not name.endswith(".mp4"):
+                continue
+            video_id = os.path.splitext(name)[0]
+            if any(v["video_id"] == video_id for v in out):
+                continue
+            out.append({
+                "video_id": video_id,
+                "kitchen_id": None,
+                "split": "preview",
+                "video_path": os.path.join(VIDEOS_DIR, name),
+                "labels_dir": os.path.join(LABELS_DIR, video_id),
+            })
+    # Demo videos shipped with the cloud deployment. Discovery works everywhere
+    # so local devs also see them if they drop a file into app/static/demo_videos/.
+    if os.path.isdir(DEMO_VIDEOS_DIR):
+        for name in sorted(os.listdir(DEMO_VIDEOS_DIR)):
+            if not name.lower().endswith(".mp4"):
+                continue
+            stem = os.path.splitext(name)[0]
+            if any(v["video_id"] == f"demo:{stem}" for v in out):
+                continue
+            out.append({
+                "video_id": f"demo:{stem}",
+                "kitchen_id": None,
+                "split": "demo",
+                "video_path": os.path.join(DEMO_VIDEOS_DIR, name),
+                "labels_dir": None,
+            })
+    return out
+
+
+def _resolve_gt_for_video(video_path, explicit_labels_dir=None):
+    """If the video was produced by our synthetic generator, find the matching
+    annotations.json so the inference tab can compute TDR/FPR.
+    """
+    if explicit_labels_dir:
+        candidate = os.path.join(explicit_labels_dir, "annotations.json")
+        if not os.path.isabs(candidate):
+            candidate = os.path.join(PROJECT_ROOT_FOR_LABELS, candidate)
+        if os.path.isfile(candidate):
+            return candidate
+
+    # Demo videos support a sidecar JSON next to the MP4:
+    #   app/static/demo_videos/demo_mouse_01.mp4
+    #   app/static/demo_videos/demo_mouse_01.json
+    stem_sidecar = os.path.splitext(video_path)[0] + ".json"
+    if os.path.isfile(stem_sidecar):
+        return stem_sidecar
+
+    video_id = os.path.splitext(os.path.basename(video_path))[0]
+    for root in [LABELS_DIR,
+                 os.path.join(PROJECT_OUTPUT_DIR, "train", "labels"),
+                 os.path.join(PROJECT_OUTPUT_DIR, "test", "labels")]:
+        cand = os.path.join(root, video_id, "annotations.json")
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+PROJECT_ROOT_FOR_LABELS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _render_inference_page(job_context=None):
+    state = load_inference_state()
+    model_info = None
+    model_path = state.get("model_path")
+    model_error = None
+    if model_path and os.path.isfile(model_path):
+        try:
+            model_info = probe_detector(model_path)
+        except Exception as e:
+            model_error = f"Failed to load checkpoint: {e}"
+    elif model_path:
+        model_error = f"Configured checkpoint missing on disk: {model_path}"
+
+    videos = _list_generated_videos()
+    recent_jobs = list_inference_jobs()[:10]
+
+    context = {
+        "active_tab": "inference",
+        "inference_model_info": model_info,
+        "inference_model_path": model_path,
+        "inference_model_error": model_error,
+        "inference_video_choices": videos,
+        "inference_recent_jobs": recent_jobs,
+        "inference_form_defaults": {
+            "threshold": 0.5,
+            "iou": 0.45,
+            "every_n": 1,
+            "max_frames": 0,
+        },
+    }
+    if job_context:
+        context.update(job_context)
+    return render_template("index.html", **context)
+
+
+@app.route("/inference", methods=["GET"])
+def inference():
+    job_id = (request.args.get("job_id") or "").strip()
+    # Preselect a video when deep-linked from the test-generator results page
+    preselect_video_id = (request.args.get("video_job_id") or "").strip() or None
+    ctx = {"inference_preselect_video_id": preselect_video_id}
+    if job_id:
+        job = get_inference_job(job_id)
+        if job:
+            ctx["inference_current_job"] = job.snapshot()
+        else:
+            flash(f"Inference job not found: {job_id}")
+    return _render_inference_page(ctx)
+
+
+@app.route("/inference/set-model", methods=["POST"])
+def inference_set_model():
+    uploaded = request.files.get("checkpoint_file")
+    pasted_path = (request.form.get("model_path") or "").strip()
+
+    if uploaded and uploaded.filename:
+        name = os.path.basename(uploaded.filename)
+        if not name.lower().endswith(".pt"):
+            flash("Checkpoint must be a .pt file.")
+            return redirect(url_for("inference"))
+        ckpt_dir = os.path.join(PROJECT_OUTPUT_DIR, "checkpoints")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        save_path = os.path.join(ckpt_dir, name)
+        uploaded.save(save_path)
+        resolved = save_path
+    elif pasted_path:
+        resolved = os.path.expanduser(pasted_path)
+    else:
+        flash("Provide a checkpoint path or upload a .pt file.")
+        return redirect(url_for("inference"))
+
+    if not os.path.isfile(resolved):
+        flash(f"Checkpoint not found: {resolved}")
+        return redirect(url_for("inference"))
+
+    try:
+        info = probe_detector(resolved)
+    except Exception as e:
+        flash(f"Failed to load checkpoint: {e}")
+        return redirect(url_for("inference"))
+
+    state = load_inference_state()
+    state["model_path"] = resolved
+    state["last_loaded_at"] = datetime.now().isoformat(timespec="seconds")
+    save_inference_state(state)
+
+    flash(
+        f"Loaded checkpoint: {os.path.basename(resolved)} "
+        f"({info.get('num_classes', 0)} classes, device={info.get('device', '?')})"
+    )
+    return redirect(url_for("inference"))
+
+
+@app.route("/inference/run", methods=["POST"])
+def inference_run():
+    state = load_inference_state()
+    model_path = state.get("model_path")
+    if not model_path or not os.path.isfile(model_path):
+        flash("No model loaded. Set a checkpoint path first.")
+        return redirect(url_for("inference"))
+
+    threshold = _parse_positive_float(request.form.get("threshold"), default=0.5)
+    iou = _parse_positive_float(request.form.get("iou"), default=0.45)
+    every_n = _parse_positive_int(request.form.get("every_n"), default=1)
+    max_frames_raw = request.form.get("max_frames") or "0"
+    try:
+        max_frames = max(0, int(max_frames_raw))
+    except (TypeError, ValueError):
+        max_frames = 0
+
+    # Resolve video source: upload takes precedence, else a picked video_id.
+    video_path = None
+    labels_dir = None
+
+    uploaded = request.files.get("video_file")
+    if uploaded and uploaded.filename:
+        if not _allowed_video(uploaded.filename):
+            flash("Upload a valid video (mp4, mov, avi, mkv, webm).")
+            return redirect(url_for("inference"))
+        safe_name = f"upload_{uuid.uuid4().hex[:8]}_{os.path.basename(uploaded.filename)}"
+        video_path = os.path.join(INFERENCE_UPLOAD_DIR, safe_name)
+        uploaded.save(video_path)
+    else:
+        picked = (request.form.get("video_id") or "").strip()
+        if picked:
+            for v in _list_generated_videos():
+                if v["video_id"] == picked:
+                    video_path = v["video_path"]
+                    labels_dir = v.get("labels_dir")
+                    break
+
+    if not video_path:
+        flash("Upload a video or select one from the list.")
+        return redirect(url_for("inference"))
+
+    gt_path = None
+    if str(request.form.get("use_gt", "")).strip().lower() in {"1", "true", "on", "yes"}:
+        gt_path = _resolve_gt_for_video(video_path, labels_dir)
+
+    try:
+        job_id = start_inference_job(
+            video_path=video_path,
+            model_path=model_path,
+            threshold=threshold,
+            iou=iou,
+            every_n=every_n,
+            max_frames=max_frames,
+            gt_annotations_path=gt_path,
+        )
+    except Exception as e:
+        flash(f"Failed to start inference: {e}")
+        return redirect(url_for("inference"))
+
+    flash(f"Inference job {job_id} started.")
+    return redirect(url_for("inference", job_id=job_id))
+
+
+@app.route("/inference/status/<job_id>", methods=["GET"])
+def inference_status(job_id):
+    job = get_inference_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    return jsonify(job.snapshot())
+
+
+@app.route("/inference/annotated/<job_id>.mp4")
+def inference_annotated(job_id):
+    path = os.path.join(INFERENCE_DIR, job_id, "annotated.mp4")
+    if not os.path.isfile(path):
+        return "Not found", 404
+    return send_from_directory(os.path.join(INFERENCE_DIR, job_id), "annotated.mp4")
+
+
+@app.route("/inference/predictions/<job_id>.json")
+def inference_predictions(job_id):
+    path = os.path.join(INFERENCE_DIR, job_id, "predictions.json")
+    if not os.path.isfile(path):
+        return "Not found", 404
+    return send_from_directory(os.path.join(INFERENCE_DIR, job_id), "predictions.json")
 
 
 # ---------------------------------------------------------------------------
@@ -1492,8 +1856,10 @@ def cleanup():
 
 
 if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "5000"))
+    debug = not CLOUD_MODE
     try:
-        app.run(debug=True, host="0.0.0.0", port=5000)
+        app.run(debug=debug, host="0.0.0.0", port=port)
     finally:
         if TESTING_MODE:
             shutil.rmtree(_TEMP_DIR, ignore_errors=True)

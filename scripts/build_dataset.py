@@ -40,10 +40,18 @@ Output:
 
 import argparse
 import json
+import os
 import shutil
 import sys
+import time
 from collections import defaultdict
 from pathlib import Path
+
+try:
+    from tqdm import tqdm
+    _TQDM = True
+except ImportError:
+    _TQDM = False
 
 
 # ── Class definitions (must match generator/compositing.py _CATEGORY_MAP) ─────
@@ -160,31 +168,47 @@ def process_split(
     output_dir: Path,
     every_n: int,
     stats: dict,
+    resume: bool = False,
+    use_symlinks: bool = False,
 ):
-    """Copy frames and write YOLO labels for one split."""
+    """Copy (or symlink) frames and write YOLO labels for one split."""
     img_out_dir   = output_dir / "images" / split
     label_out_dir = output_dir / "labels" / split
     img_out_dir.mkdir(parents=True, exist_ok=True)
     label_out_dir.mkdir(parents=True, exist_ok=True)
 
     n_images = 0
+    n_skipped = 0
     n_annotations = 0
     per_class = defaultdict(int)
 
-    for frames_dir, labels_dir in job_dirs:
+    total_jobs = len(job_dirs)
+    t0 = time.time()
+
+    iterator = tqdm(job_dirs, desc=split, unit="job") if _TQDM else job_dirs
+
+    for job_idx, (frames_dir, labels_dir) in enumerate(iterator):
         records = collect_job_frames(frames_dir, labels_dir, every_n=every_n)
-        job_id  = frames_dir.parent.name  # frames/<job_id>
+        job_id  = frames_dir.name
 
         for rec in records:
             stem = f"{job_id}_{rec['frame_path'].stem}"
             img_dest   = img_out_dir   / f"{stem}.jpg"
             label_dest = label_out_dir / f"{stem}.txt"
 
-            # Copy image
-            if rec["frame_path"].suffix.lower() == ".jpg":
+            if resume and img_dest.exists() and label_dest.exists():
+                n_skipped += 1
+                n_images  += 1
+                continue
+
+            if use_symlinks:
+                src = rec["frame_path"].resolve()
+                if img_dest.is_symlink() or img_dest.exists():
+                    img_dest.unlink()
+                os.symlink(src, img_dest)
+            elif rec["frame_path"].suffix.lower() == ".jpg":
                 shutil.copy2(rec["frame_path"], img_dest)
             else:
-                # Re-save as JPEG via PIL for consistency
                 try:
                     from PIL import Image
                     Image.open(rec["frame_path"]).convert("RGB").save(
@@ -195,12 +219,27 @@ def process_split(
             # Write YOLO label
             n_ann = write_yolo_label(
                 label_dest, rec["annotations"], rec["img_w"], rec["img_h"])
-            n_images     += 1
+            n_images      += 1
             n_annotations += n_ann
             for ann in rec["annotations"]:
                 yolo_id = COCO_TO_YOLO_ID.get(ann["category_id"])
                 if yolo_id is not None:
                     per_class[CLASS_NAMES[yolo_id]] += 1
+
+        if not _TQDM and (job_idx + 1) % 100 == 0:
+            elapsed  = time.time() - t0
+            pct      = (job_idx + 1) / total_jobs * 100
+            eta_s    = elapsed / (job_idx + 1) * (total_jobs - job_idx - 1)
+            eta_min  = eta_s / 60
+            print(f"  [{split}] {job_idx+1}/{total_jobs} jobs ({pct:.0f}%)  "
+                  f"frames={n_images:,}  skipped={n_skipped:,}  "
+                  f"elapsed={elapsed/60:.1f}m  ETA={eta_min:.1f}m",
+                  flush=True)
+
+    elapsed = time.time() - t0
+    mode_str = "symlinked" if use_symlinks else "copied"
+    skip_note = f"  ({n_skipped:,} already existed, skipped)" if resume and n_skipped else ""
+    print(f"  [{split}] done in {elapsed/60:.1f}m — {n_images:,} frames {mode_str}{skip_note}")
 
     stats[split] = {
         "images":      n_images,
@@ -229,6 +268,13 @@ def main():
                              "Use 2 to halve dataset size with minimal quality loss.")
     parser.add_argument("--dry_run", action="store_true",
                         help="Count frames that would be processed without copying")
+    parser.add_argument("--resume", action="store_true",
+                        help="Skip frames whose image+label files already exist in output_dir "
+                             "(safe to use after an interrupted run)")
+    parser.add_argument("--symlink", action="store_true",
+                        help="Create symlinks to frame images instead of copying them. "
+                             "~100x faster on Google Drive FUSE — avoids reading/writing "
+                             "image data entirely. YOLO reads through symlinks at train time.")
     args = parser.parse_args()
 
     render_dir = Path(args.render_dir)
@@ -291,12 +337,28 @@ def main():
             print(f"  {s}: ~{total} frames")
         return
 
+    # Warn if output_dir is on a network mount (Google Drive / FUSE)
+    # Writing 100K+ small files to Drive triggers quota errors and is ~10x slower.
+    out_str = str(output_dir.resolve())
+    if any(p in out_str for p in ("/gdrive", "/content/drive", "/mnt/drive")):
+        print("\n⚠️  WARNING: output_dir is on Google Drive.")
+        print("   Writing 100K+ small files to Drive will hit quota limits and be very slow.")
+        print("   Recommended: use a local path like /content/pest_dataset, then tar+copy to Drive.")
+        print("   Continuing anyway — use Ctrl+C to abort and re-run with a local output path.\n")
+
     output_dir.mkdir(parents=True, exist_ok=True)
     stats = {}
 
+    if args.resume:
+        print("\n[resume mode] Already-copied frames will be skipped.")
+
+    if args.symlink:
+        print("\n[symlink mode] Images will be symlinked, not copied (fast on Drive FUSE).")
+
     for split in active_splits:
         print(f"\nProcessing {split}...")
-        process_split(split, split_jobs[split], output_dir, args.every_n, stats)
+        process_split(split, split_jobs[split], output_dir, args.every_n, stats,
+                      resume=args.resume, use_symlinks=args.symlink)
         s = stats[split]
         print(f"  {s['images']} frames  |  {s['annotations']} annotations  "
               f"|  per-class: {s['per_class']}")

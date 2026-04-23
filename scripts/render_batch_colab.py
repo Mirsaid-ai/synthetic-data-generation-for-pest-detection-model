@@ -289,9 +289,21 @@ def main():
 
     # Render each kitchen in this session's slice
     total_ok = 0
+    total_skipped = 0
     for ki, kitchen_path in enumerate(session_kitchens, 1):
         split = "train" if kitchen_path in splits["train"] else (
                 "val"   if kitchen_path in splits["val"]   else "held_out")
+
+        key = kitchen_path.name
+
+        # Skip kitchens that are already fully rendered in the manifest.
+        # This makes re-runs safe even if TOTAL_SESSIONS changes between runs.
+        already_done = len(manifest["kitchens"].get(key, {}).get("job_ids", []))
+        if already_done >= args.n:
+            print(f"[{ki}/{len(session_kitchens)}] {kitchen_path.name}  ({split})  "
+                  f"[skip — {already_done} videos already in manifest]")
+            total_skipped += 1
+            continue
 
         print(f"[{ki}/{len(session_kitchens)}] {kitchen_path.name}  ({split})")
 
@@ -310,7 +322,6 @@ def main():
         total_ok += len(job_ids)
 
         # Update manifest entry for this kitchen
-        key = kitchen_path.name
         if key not in manifest["kitchens"]:
             manifest["kitchens"][key] = {"split": split, "job_ids": []}
         manifest["kitchens"][key]["job_ids"].extend(job_ids)
@@ -318,6 +329,9 @@ def main():
         # Persist manifest after every kitchen so partial runs are resumable
         if not args.dry_run:
             manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    if total_skipped:
+        print(f"\n{total_skipped} kitchens skipped (already fully rendered).")
 
     print(f"\nSession done.  {total_ok} videos rendered.")
     print(f"Manifest: {manifest_path}")

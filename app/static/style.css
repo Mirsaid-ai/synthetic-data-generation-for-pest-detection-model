@@ -650,3 +650,146 @@ video {
         align-items: stretch;
     }
 }
+
+/* ---------------------------------------------------------------------- */
+/* Model Inference tab                                                    */
+/* ---------------------------------------------------------------------- */
+
+.inference-panel {
+    background: #fff;
+    border: 1px solid #dee2e6;
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.inference-model-widget {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+.inf-video-picker {
+    background: #f8f9fa;
+    border: 1px solid #e9ecef;
+    border-radius: 6px;
+    padding: 0.7rem 0.9rem;
+    margin-top: 0.6rem;
+}
+
+.inf-video-picker select {
+    width: 100%;
+    padding: 0.45rem 0.55rem;
+    border: 1px solid #ced4da;
+    border-radius: 4px;
+    background: #fff;
+}
+
+.inf-summary-card {
+    background: #fff;
+    border: 1px solid #dee2e6;
+    border-radius: 8px;
+    padding: 0.9rem 1.1rem;
+    margin: 0.8rem 0;
+}
+
+.inf-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 0.8rem 1.2rem;
+}
+
+.inf-summary-grid small {
+    color: #6c757d;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.inf-summary-grid strong {
+    font-size: 1.05rem;
+    color: #212529;
+}
+
+.inf-metrics-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.8rem;
+    align-items: center;
+    margin-top: 0.9rem;
+    padding-top: 0.8rem;
+    border-top: 1px dashed #e9ecef;
+}
+
+.inf-metric {
+    background: #f1f3f5;
+    border-radius: 6px;
+    padding: 0.5rem 0.8rem;
+    min-width: 140px;
+}
+
+.inf-metric small {
+    color: #495057;
+    font-size: 0.74rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.inf-metric strong {
+    font-size: 1.15rem;
+    color: #212529;
+}
+
+.inf-pass-badge {
+    padding: 0.45rem 0.85rem;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: 0.9rem;
+    background: #e9ecef;
+    color: #495057;
+}
+
+.inf-pass-ok {
+    background: #d1e7dd;
+    color: #0f5132;
+}
+
+.inf-pass-fail {
+    background: #f8d7da;
+    color: #842029;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Kitchen Generator -> Test Video Generator hand-off                     */
+/* ---------------------------------------------------------------------- */
+
+.kgen-handoff {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    background: #d1e7dd;
+    border: 1px solid #a3cfbb;
+    color: #0f5132;
+    padding: 0.7rem 1rem;
+    border-radius: 6px;
+    margin-bottom: 1rem;
+}
+
+.kgen-handoff code {
+    background: rgba(15, 81, 50, 0.1);
+    padding: 0.1rem 0.35rem;
+    border-radius: 3px;
+}
+
+.curated-card-highlight {
+    outline: 3px solid #198754;
+    outline-offset: 2px;
+    animation: curated-pulse 1.4s ease-out 1;
+}
+
+@keyframes curated-pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(25, 135, 84, 0.55); }
+    100% { box-shadow: 0 0 0 14px rgba(25, 135, 84, 0);  }
+}

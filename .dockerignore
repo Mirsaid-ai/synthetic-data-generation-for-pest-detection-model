@@ -1,0 +1,42 @@
+# Heavy artifacts that should NEVER ship in the Space image
+pest_dataset.tar.gz
+code.zip
+*.mp4
+!app/static/demo_videos/*.mp4
+*.tar.gz
+*.zip
+
+# Local caches and scratch dirs
+outputs/
+depth_cache/
+logs/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.cache/
+.mypy_cache/
+
+# Node deps from the legacy Next.js UI (not used by the Flask app)
+kitchen_image_gen/node_modules/
+
+# Legacy / historical data that lives in the repo but has no runtime role
+colab_render*.ipynb
+depth_cache
+generator/kitchen_img/uncurated_img/
+generator/kitchen_img/generated_img/
+generator/kitchen_img/curated_img/
+.claude/
+.cursor/
+
+# Local environments
+.venv/
+venv/
+env/
+
+# OS junk
+.DS_Store
+*.swp
+.git/
