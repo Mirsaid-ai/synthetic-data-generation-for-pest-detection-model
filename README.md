@@ -87,49 +87,49 @@ A note on the brief's phrase *"trains a vision transformer"*: we evaluated DETR 
 flowchart TB
     subgraph s1 [Stage 1 - Image Acquisition]
         direction TB
-        Scrape[Places365 scrape<br/>category 203 /k/kitchen] --> Curate
-        Gemini[Gemini 2.0 / 3.1 flash<br/>image generation] --> Curate
-        RealESRGAN[Real-ESRGAN x4plus<br/>256 -> 1024] --> Curate
-        Curate[Flask Curator tab<br/>manual keep / delete]
+        Scrape["Places365 scrape<br/>category 203 /k/kitchen"] --> Curate
+        Gemini["Gemini 2.0 / 3.1 flash<br/>image generation"] --> Curate
+        RealESRGAN["Real-ESRGAN x4plus<br/>256 -> 1024"] --> Curate
+        Curate["Flask Curator tab<br/>manual keep / delete"]
     end
 
     subgraph s2 [Stage 2 - Video Generation]
         direction TB
-        Metric3D[Metric3D v2 ViT<br/>depth + normals] --> Gravity
-        Gravity[LSD + Canny + Hough + RANSAC<br/>gravity direction] --> Surfaces
-        Surfaces[Surface-group masks<br/>up / side_* / down] --> Spawn
-        Spawn[Pest spawning<br/>P(0)=0.25, geometric decay] --> Animate
-        Animate[Surface-aware random walk<br/>per-surface stickiness] --> Composite
-        Composite[PIL sprite compositing<br/>contact shadows] --> CCTV
-        CCTV[CCTV simulator<br/>noise / JPEG / IR / blur / downres] --> Encode
-        Encode[ffmpeg libx264<br/>mp4v fallback] --> Videos
-        Videos[MP4 + COCO JSON]
+        Metric3D["Metric3D v2 ViT<br/>depth + normals"] --> Gravity
+        Gravity["LSD + Canny + Hough + RANSAC<br/>gravity direction"] --> Surfaces
+        Surfaces["Surface-group masks<br/>up / side_* / down"] --> Spawn
+        Spawn["Pest spawning<br/>P(0)=0.25, geometric decay"] --> Animate
+        Animate["Surface-aware random walk<br/>per-surface stickiness"] --> Composite
+        Composite["PIL sprite compositing<br/>contact shadows"] --> CCTV
+        CCTV["CCTV simulator<br/>noise / JPEG / IR / blur / downres"] --> Encode
+        Encode["ffmpeg libx264<br/>mp4v fallback"] --> Videos
+        Videos["MP4 + COCO JSON"]
     end
 
     subgraph s3 [Stage 3 - Dataset Build]
         direction TB
-        Manifest[render manifest.json<br/>kitchen-level splits] --> Convert
-        Convert[COCO 1-indexed -> YOLO 0-indexed] --> Yaml[data.yaml]
+        Manifest["render manifest.json<br/>kitchen-level splits"] --> Convert
+        Convert["COCO 1-indexed -> YOLO 0-indexed"] --> Yaml["data.yaml"]
     end
 
     subgraph s4 [Stage 4 - Training]
         direction TB
-        Colab[Google Colab Pro T4] --> Train
-        Train[Ultralytics YOLOv8m<br/>100 epochs, imgsz 640, batch 16] --> Weights[best.pt]
+        Colab["Google Colab Pro T4"] --> Train
+        Train["Ultralytics YOLOv8m<br/>100 epochs, imgsz 640, batch 16"] --> Weights["best.pt"]
     end
 
     subgraph s5 [Stage 5 - Inference]
         direction TB
-        Flask[Flask /inference tab] --> Detect
-        Detect[YoloDetector.detect<br/>threshold 0.5, NMS IoU 0.45] --> Metrics
+        Flask["Flask /inference tab"] --> Detect
+        Detect["YoloDetector.detect<br/>threshold 0.5, NMS IoU 0.45"] --> Metrics
         Metrics["Per-frame TDR / FPR / precision<br/>PASSES badge when TDR>=0.80 and FPR<0.05"]
     end
 
     subgraph s6 [Deployment]
         direction TB
-        Docker[Dockerfile<br/>python:3.11-slim + CPU torch + ffmpeg] --> HF
-        HF[HF Space<br/>CLOUD_MODE=1, MODEL_PATH or CHECKPOINT_URL] --> PublicUI
-        PublicUI[Public /inference UI<br/>demo videos + upload]
+        Docker["Dockerfile<br/>python:3.11-slim + CPU torch + ffmpeg"] --> HF
+        HF["HF Space<br/>CLOUD_MODE=1, MODEL_PATH or CHECKPOINT_URL"] --> PublicUI
+        PublicUI["Public /inference UI<br/>demo videos + upload"]
     end
 
     s1 --> s2
@@ -137,7 +137,7 @@ flowchart TB
     s3 --> s4
     s4 --> s5
     s5 --> s6
-    RealVideo[Instructor's real test video] --> s5
+    RealVideo["Instructor's real test video"] --> s5
 ```
 
 The same `generator/pipeline.py` code path serves the Flask **Test Video Generator** tab (one-click rendering) and the **Real Video Generator** batch endpoint used by Colab for mass rendering.
